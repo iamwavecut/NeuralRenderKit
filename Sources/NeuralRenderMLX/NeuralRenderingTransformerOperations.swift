@@ -248,6 +248,10 @@ struct NeuralRenderingWindowBlock {
         weights, name: "\(prefix).ffn_output_projection_weight",
         shape: [channels, channels]
       )
+      let denseExpansion = compileBlock
+        ? NeuralRenderingTransformerOperations.denseExpansionWeight(expansionWeight) : nil
+      let groupedProjection = compileBlock
+        ? NeuralRenderingTransformerOperations.groupedProjectionWeight(branchProjectionWeight) : nil
       operation = { input in
         NeuralRenderingTransformerOperations.branchedWindowBlock(
           input,
@@ -264,7 +268,10 @@ struct NeuralRenderingWindowBlock {
           windowSize: NeuralRenderingGraphContract.windowSize,
           windowOrigin: windowOrigin,
           preciseSoftmax: true,
-          fusedFeedForward: compileBlock
+          fusedFeedForward: compileBlock,
+          fusedAttention: compileBlock,
+          denseExpansionWeight: denseExpansion,
+          groupedProjectionWeight: groupedProjection
         )
       }
     } else {
@@ -1979,7 +1986,7 @@ enum NeuralRenderingTransformerOperations {
     return matmul(attended, projectionWeight)
   }
 
-  private static func windowAttention(
+  static func windowAttention(
     _ input: MLXArray,
     qkvWeight: MLXArray,
     attentionScale: MLXArray,
@@ -1988,11 +1995,27 @@ enum NeuralRenderingTransformerOperations {
     headCount: Int,
     windowSize: Int,
     windowOrigin: NeuralRenderingWindowOrigin,
-    preciseSoftmax: Bool
+    preciseSoftmax: Bool,
+    fusedAttention: Bool = false
   ) -> MLXArray {
     precondition(input.ndim == 4)
     precondition(windowOrigin.y <= 0 && windowOrigin.y > -windowSize)
     precondition(windowOrigin.x <= 0 && windowOrigin.x > -windowSize)
+    if fusedAttention, preciseSoftmax, windowSize == NeuralRenderingFusedWindowAttention.windowSize,
+      input.shape[0] == 1, input.dtype == .float16, input.shape[3] == headCount * 32
+    {
+      // Same numerics as the padded per-operation path: the projection GEMM on
+      // the image rows, the window core in one kernel, the output GEMM.
+      let projected = matmul(input, qkvWeight)
+      let attended = NeuralRenderingFusedWindowAttention.apply(
+        qkv: projected,
+        attentionScale: attentionScale,
+        attentionBias: attentionBias,
+        headCount: headCount,
+        windowOrigin: windowOrigin
+      )
+      return matmul(attended, projectionWeight)
+    }
     let shape = input.shape
     let padTop = -windowOrigin.y
     let padLeft = -windowOrigin.x
@@ -2289,6 +2312,84 @@ enum NeuralRenderingTransformerOperations {
     )
   }
 
+  /// Experiment toggle (`NRK_DENSE_FFN=0` disables): the branched feed-forward
+  /// as dense GEMMs with float accumulation instead of the half-accumulating
+  /// tile kernels.
+  nonisolated(unsafe) static var denseFeedForwardEnabled: Bool =
+    ProcessInfo.processInfo.environment["NRK_DENSE_FFN"] != "0"
+
+  private static let quadraticGatePublishKernel = MLXFast.metalKernel(
+    name: "nrk_quadratic_gate_publish",
+    inputNames: ["input", "params"],
+    outputNames: ["output"],
+    source: #"""
+      const uint index = thread_position_in_grid.x;
+      if (index >= params[0]) { return; }
+      const device half4* input4 = (const device half4*)input;
+      device half4* output4 = (device half4*)output;
+      half4 value = input4[index];
+      half4 clamped = clamp(value, half4(-4.0h), half4(4.0h));
+      half4 linear = fma(abs(clamped), half4(-0.055908203125h), half4(0.447265625h));
+      half4 gate = fma(clamped, linear, half4(0.89453125h));
+      half4 activated = value * gate;
+      output4[index] = half4(
+        half(float(nrk_e4m3(activated.x))), half(float(nrk_e4m3(activated.y))),
+        half(float(nrk_e4m3(activated.z))), half(float(nrk_e4m3(activated.w))));
+      """#,
+    header: e4m3MetalHeader
+  )
+
+  /// `e4m3RoundTrip(quadraticGateActivation(input))` in one pass (half4 lanes).
+  static func quadraticGatePublish(_ input: MLXArray) -> MLXArray {
+    precondition(input.dtype == .float16 && input.size.isMultiple(of: 4))
+    let count = input.size / 4
+    return quadraticGatePublishKernel(
+      [input, MLXArray([UInt32(count)])],
+      grid: (count, 1, 1),
+      threadGroup: (min(count, 256), 1, 1),
+      outputShapes: [input.shape],
+      outputDTypes: [.float16]
+    )[0]
+  }
+
+  /// Dense arrangement of the branched expansion weight `[G, 4, G, 32, 32]`
+  /// (output group, branch, input group, k, c) as `[C, 4C]` with columns
+  /// ordered (output group, branch, c), matching the fused kernels' layout.
+  static func denseExpansionWeight(_ expansionWeight: MLXArray) -> MLXArray {
+    let groupCount = expansionWeight.shape[0]
+    let channels = groupCount * 32
+    let dense = expansionWeight.transposed(2, 3, 0, 1, 4).reshaped([channels, channels * 4])
+    eval(dense)
+    return dense
+  }
+
+  /// Grouped arrangement of the branch projection `[G, 4, 32, 32]` as `[G, 128, 32]`.
+  static func groupedProjectionWeight(_ branchProjectionWeight: MLXArray) -> MLXArray {
+    let grouped = branchProjectionWeight.reshaped([branchProjectionWeight.shape[0], 128, 32])
+    eval(grouped)
+    return grouped
+  }
+
+  /// Branched feed-forward as dense GEMMs: expansion `[rows, C] × [C, 4C]`,
+  /// gate + E4M3, grouped projection `[G, rows, 128] × [G, 128, 32]` (the
+  /// branch sum folded into K), E4M3, output projection. Same publication
+  /// points as the tile kernels; the GEMMs accumulate in float.
+  static func denseBranchedFeedForward(
+    _ input: MLXArray,
+    denseExpansionWeight: MLXArray,
+    groupedProjectionWeight: MLXArray,
+    outputProjectionWeight: MLXArray
+  ) -> MLXArray {
+    let channels = input.shape[input.ndim - 1]
+    let groupCount = channels / 32
+    let rowCount = input.size / channels
+    let flat = input.reshaped([rowCount, channels])
+    let gated = quadraticGatePublish(matmul(flat, denseExpansionWeight))
+    let grouped = gated.reshaped([rowCount, groupCount, 128]).transposed(1, 0, 2)
+    let projected = matmul(grouped, groupedProjectionWeight).transposed(1, 0, 2).reshaped([rowCount, channels])
+    return matmul(e4m3RoundTrip(projected), outputProjectionWeight).reshaped(input.shape)
+  }
+
   static func branchedWindowBlock(
     _ input: MLXArray,
     expansionWeight: MLXArray,
@@ -2304,10 +2405,22 @@ enum NeuralRenderingTransformerOperations {
     windowSize: Int,
     windowOrigin: NeuralRenderingWindowOrigin = .zero,
     preciseSoftmax: Bool = true,
-    fusedFeedForward: Bool = false
+    fusedFeedForward: Bool = false,
+    fusedAttention: Bool = false,
+    denseExpansionWeight: MLXArray? = nil,
+    groupedProjectionWeight: MLXArray? = nil
   ) -> MLXArray {
     precondition(input.ndim == 4)
-    let feedForwardBranch =
+    let feedForwardBranch: MLXArray
+    if fusedFeedForward, denseFeedForwardEnabled, let denseExpansionWeight, let groupedProjectionWeight {
+      feedForwardBranch = denseBranchedFeedForward(
+        input,
+        denseExpansionWeight: denseExpansionWeight,
+        groupedProjectionWeight: groupedProjectionWeight,
+        outputProjectionWeight: outputProjectionWeight
+      )
+    } else {
+      feedForwardBranch =
       fusedFeedForward
       ? fusedBranchedFeedForward(
         input,
@@ -2321,15 +2434,20 @@ enum NeuralRenderingTransformerOperations {
         branchProjectionWeight: branchProjectionWeight,
         outputProjectionWeight: outputProjectionWeight
       )
+    }
     // Published as E4M3 before the attention reads it (multi-head kernels only;
     // the single-head window block keeps its residual in fp16 registers).
-    let feedForwardOutput = e4m3RoundTrip(
-      cosineResidual(
-        skip: input,
-        branch: feedForwardBranch,
-        cosine: feedForwardCosine
+    let feedForwardOutput =
+      fusedAttention && input.dtype == .float16 && feedForwardBranch.dtype == .float16
+      ? NeuralRenderingFusedWindowAttention.cosineResidual(
+        skip: input, branch: feedForwardBranch, cosine: feedForwardCosine, publish: true)
+      : e4m3RoundTrip(
+        cosineResidual(
+          skip: input,
+          branch: feedForwardBranch,
+          cosine: feedForwardCosine
+        )
       )
-    )
     let attentionBranch = windowAttention(
       feedForwardOutput,
       qkvWeight: qkvWeight,
@@ -2339,7 +2457,8 @@ enum NeuralRenderingTransformerOperations {
       headCount: headCount,
       windowSize: windowSize,
       windowOrigin: windowOrigin,
-      preciseSoftmax: preciseSoftmax
+      preciseSoftmax: preciseSoftmax,
+      fusedAttention: fusedAttention
     )
     return cosineResidual(
       skip: feedForwardOutput,
