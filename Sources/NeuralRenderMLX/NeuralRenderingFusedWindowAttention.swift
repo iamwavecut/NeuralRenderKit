@@ -16,6 +16,23 @@ import MLX
 /// and per-row softmax totals, half arithmetic everywhere else. Tokens outside
 /// the image (shifted origins, ragged edges) behave like the zero padding of
 /// the per-operation path: their q/k/v are zero and their outputs are dropped.
+/// Small integer parameter buffers for the custom kernels, kept alive for
+/// the process. A parameter array created per call is released as soon as
+/// its consumer is encoded, and MLX's concurrent command encoder only
+/// orders dispatches by read-after-write and write-after-write on buffers:
+/// a recycled parameter buffer could be overwritten while the kernel that
+/// reads it is still running. Caching by value keeps every buffer alive.
+enum NeuralRenderingKernelParameters {
+  nonisolated(unsafe) private static var cache: [[UInt32]: MLXArray] = [:]
+  static func array(_ values: [UInt32]) -> MLXArray {
+    if let cached = cache[values] { return cached }
+    let created = MLXArray(values)
+    eval(created)
+    cache[values] = created
+    return created
+  }
+}
+
 enum NeuralRenderingFusedWindowAttention {
   static let windowSize = 8
   static let simdgroupsPerWindow = 4
@@ -27,7 +44,8 @@ enum NeuralRenderingFusedWindowAttention {
     source: #"""
       // Threadgroup memory (halfs): K 0..2048, V 2048..4096, 640 of scratch per simdgroup
       // (512 for the query rows / scores, then 16 reciprocals).
-      threadgroup half arena[4096 + 4 * 640];
+      threadgroup half4 arena4[(4096 + 4 * 640) / 4];
+      threadgroup half* arena = (threadgroup half*)arena4;
       threadgroup half* K = arena;
       threadgroup half* V = arena + 2048;
       threadgroup half4* K4 = (threadgroup half4*)K;
@@ -58,55 +76,63 @@ enum NeuralRenderingFusedWindowAttention {
       const device half4* attentionBias4 = (const device half4*)attentionBias;
       const half scale = attentionScale[head];
 
-      // Phase 0: raw k and v rows of all 64 tokens (zeros outside the image).
-      for (uint i = tid; i < 512; i += 128) {
-        const uint token = i / 8;
-        const int y = rowY0 + int(token / 8);
-        const int x = colX0 + int(token % 8);
-        const bool in = y >= 0 && y < int(height) && x >= 0 && x < int(width);
-        const uint base = in ? ((uint(y) * width + uint(x)) * rowStride + head * 32) / 4 : 0u;
-        K4[i] = in ? qkv4[base + channels / 4 + i % 8] : half4(0.0h);
-        V4[i] = in ? qkv4[base + channels / 2 + i % 8] : half4(0.0h);
-      }
-      threadgroup_barrier(mem_flags::mem_threadgroup);
-      // Per-token cosine normalisation of k (one lane per token, sequential
-      // partial sums), then E4M3 of k and v element-wise.
-      if (tid < 64) {
-        threadgroup half* vec = K + tid * 32;
-        half value[32];
-        for (uint c = 0; c < 32; ++c) { value[c] = vec[c]; }
-        half partial[4][2];
-        for (uint l = 0; l < 4; ++l) {
-          for (uint parity = 0; parity < 2; ++parity) {
-            uint c = l * 2 + parity;
-            half first = fma(value[c + 8], value[c + 8], value[c] * value[c]);
-            half second = fma(value[c + 24], value[c + 24], value[c + 16] * value[c + 16]);
-            partial[l][parity] = first + second;
+      // Phase 0: this simdgroup's 16 tokens. Keys: stage, cosine-normalise (one
+      // lane per token, sequential partial sums), publish into the shared K rows.
+      // Values: stage, publish into the shared V rows.
+      for (uint part = 1; part < 3; ++part) {
+        for (uint i = lane; i < 128; i += 32) {
+          const uint token = simd * 16 + i / 8;
+          const int y = rowY0 + int(token / 8);
+          const int x = colX0 + int(token % 8);
+          const bool in = y >= 0 && y < int(height) && x >= 0 && x < int(width);
+          T4[i] = in ? qkv4[((uint(y) * width + uint(x)) * rowStride + part * channels + head * 32) / 4 + i % 8] : half4(0.0h);
+        }
+        simdgroup_barrier(mem_flags::mem_threadgroup);
+        if (part == 1) {
+          if (lane < 16) {
+            threadgroup half* vec = T + lane * 32;
+            half value[32];
+            for (uint c = 0; c < 32; ++c) { value[c] = vec[c]; }
+            half partial[4][2];
+            for (uint l = 0; l < 4; ++l) {
+              for (uint parity = 0; parity < 2; ++parity) {
+                uint c = l * 2 + parity;
+                half first = fma(value[c + 8], value[c + 8], value[c] * value[c]);
+                half second = fma(value[c + 24], value[c + 24], value[c + 16] * value[c + 16]);
+                partial[l][parity] = first + second;
+              }
+            }
+            half xorTwo[4][2];
+            for (uint l = 0; l < 4; ++l) {
+              for (uint parity = 0; parity < 2; ++parity) {
+                xorTwo[l][parity] = partial[l][parity] + partial[l ^ 2][parity];
+              }
+            }
+            half xorOne[4][2];
+            for (uint l = 0; l < 4; ++l) {
+              for (uint parity = 0; parity < 2; ++parity) {
+                xorOne[l][parity] = xorTwo[l][parity] + xorTwo[l ^ 1][parity];
+              }
+            }
+            half norm = max(xorOne[0][0] + xorOne[0][1], half(0.00006198883056640625));
+            R[lane] = half(metal::fast::rsqrt(float(norm)));
+          }
+          simdgroup_barrier(mem_flags::mem_threadgroup);
+          for (uint i = lane; i < 128; i += 32) {
+            half4 normalized = T4[i] * R[i / 8];
+            K4[(simd * 16 + i / 8) * 8 + i % 8] = half4(
+              half(float(nrk_e4m3(normalized.x))), half(float(nrk_e4m3(normalized.y))),
+              half(float(nrk_e4m3(normalized.z))), half(float(nrk_e4m3(normalized.w))));
+          }
+        } else {
+          for (uint i = lane; i < 128; i += 32) {
+            half4 value = T4[i];
+            V4[(simd * 16 + i / 8) * 8 + i % 8] = half4(
+              half(float(nrk_e4m3(value.x))), half(float(nrk_e4m3(value.y))),
+              half(float(nrk_e4m3(value.z))), half(float(nrk_e4m3(value.w))));
           }
         }
-        half xorTwo[4][2];
-        for (uint l = 0; l < 4; ++l) {
-          for (uint parity = 0; parity < 2; ++parity) {
-            xorTwo[l][parity] = partial[l][parity] + partial[l ^ 2][parity];
-          }
-        }
-        half xorOne[4][2];
-        for (uint l = 0; l < 4; ++l) {
-          for (uint parity = 0; parity < 2; ++parity) {
-            xorOne[l][parity] = xorTwo[l][parity] + xorTwo[l ^ 1][parity];
-          }
-        }
-        half norm = max(xorOne[0][0] + xorOne[0][1], half(0.00006198883056640625));
-        half reciprocal = half(metal::fast::rsqrt(float(norm)));
-        for (uint c = 0; c < 32; ++c) {
-          vec[c] = half(float(nrk_e4m3(value[c] * reciprocal)));
-        }
-      }
-      for (uint i = tid; i < 512; i += 128) {
-        half4 value = V4[i];
-        V4[i] = half4(
-          half(float(nrk_e4m3(value.x))), half(float(nrk_e4m3(value.y))),
-          half(float(nrk_e4m3(value.z))), half(float(nrk_e4m3(value.w))));
+        simdgroup_barrier(mem_flags::mem_threadgroup);
       }
 
       // Queries of this simdgroup's 16 tokens: stage, normalise with the head
@@ -290,7 +316,7 @@ enum NeuralRenderingFusedWindowAttention {
     let windowsY = (height + padTop + windowSize - 1) / windowSize
     let windowsX = (width + padLeft + windowSize - 1) / windowSize
     let threadgroups = windowsY * windowsX * headCount
-    let params = MLXArray([UInt32(height), UInt32(width), UInt32(padTop), UInt32(padLeft), UInt32(headCount)])
+    let params = NeuralRenderingKernelParameters.array([UInt32(height), UInt32(width), UInt32(padTop), UInt32(padLeft), UInt32(headCount)])
     return kernel(
       [
         qkv, attentionScale.asType(.float16), attentionBias.asType(.float16).reshaped([headCount * 64 * 64]),
@@ -336,7 +362,7 @@ enum NeuralRenderingFusedWindowAttention {
     let channels = skip.shape[skip.ndim - 1]
     precondition(cosine.shape == [channels] && channels.isMultiple(of: 4))
     let count = skip.size / 4
-    let params = MLXArray([UInt32(count), UInt32(channels), publish ? UInt32(1) : UInt32(0)])
+    let params = NeuralRenderingKernelParameters.array([UInt32(count), UInt32(channels), publish ? UInt32(1) : UInt32(0)])
     return residualKernel(
       [branch, skip, cosine.asType(.float16), params],
       grid: (count, 1, 1),

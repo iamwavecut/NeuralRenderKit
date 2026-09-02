@@ -35,7 +35,8 @@ enum NeuralRenderingFusedWindowBlock {
     source: #"""
       // Threadgroup memory (halfs): shared region 0..4096 (weight chunks, then
       // K 0..2048 and V 2048..4096), then 768 halfs of scratch per simdgroup.
-      threadgroup half arena[4096 + 4 * 768];
+      threadgroup half4 arena4[(4096 + 4 * 768) / 4];
+      threadgroup half* arena = (threadgroup half*)arena4;
       threadgroup half* W = arena;
       threadgroup half4* W4 = (threadgroup half4*)W;
       threadgroup half* K = arena;
@@ -421,7 +422,7 @@ enum NeuralRenderingFusedWindowBlock {
     let half = { (array: MLXArray) in array.asType(.float16) }
     // Geometry travels in a buffer rather than template values so the kernel is
     // compiled once per process instead of once per shape and window phase.
-    let params = MLXArray([UInt32(height), UInt32(width), UInt32(padTop), UInt32(padLeft), publish ? UInt32(1) : UInt32(0)])
+    let params = NeuralRenderingKernelParameters.array([UInt32(height), UInt32(width), UInt32(padTop), UInt32(padLeft), publish ? UInt32(1) : UInt32(0)])
     return kernel(
       [
         input, half(expansionWeight), half(feedForwardProjectionWeight), half(feedForwardCosine),

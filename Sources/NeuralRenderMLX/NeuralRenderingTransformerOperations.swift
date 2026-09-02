@@ -816,9 +816,14 @@ struct NeuralRenderingDecoderInput {
   }
 
   func callAsFunction(_ input: MLXArray, skip: MLXArray) -> MLXArray {
-    NeuralRenderingTransformerOperations.e4m3RoundTrip(
+    let projected = matmul(input, projectionWeight)
+    if NeuralRenderingFusedGlue.canMerge(low: projected, skip: skip) {
+      return NeuralRenderingFusedGlue.upsampleMerge(
+        low: projected, skip: skip, lowScale: nil, skipScale: skipSine, publish: true)
+    }
+    return NeuralRenderingTransformerOperations.e4m3RoundTrip(
       NeuralRenderingTransformerOperations.decoderInputMerge(
-        matmul(input, projectionWeight),
+        projected,
         skip: skip,
         skipSine: skipSine
       )
@@ -872,14 +877,19 @@ struct NeuralRenderingUpsampleBlock {
 
   func callAsFunction(_ input: MLXArray, skip: MLXArray) -> MLXArray {
     let projected = matmul(input, projectionWeight)
+    // The fused upsample kernels read the merged tensor as E4M3 (vendor
+    // decoder captures: blocks 48/56/62 move from 0.037-0.041 to 0.019-0.022).
+    if NeuralRenderingFusedGlue.canMerge(low: projected, skip: skip) {
+      return windowBlock(
+        NeuralRenderingFusedGlue.upsampleMerge(
+          low: projected, skip: skip, lowScale: nil, skipScale: skipSine, publish: true))
+    }
     let skipPath = skip * skipSine
     let upsampled = NeuralRenderingTransformerOperations.nearestUpsample2Crop(
       projected,
       height: skip.shape[1],
       width: skip.shape[2]
     )
-    // The fused upsample kernels read the merged tensor as E4M3 (vendor
-    // decoder captures: blocks 48/56/62 move from 0.037-0.041 to 0.019-0.022).
     return windowBlock(
       NeuralRenderingTransformerOperations.e4m3RoundTrip(upsampled + skipPath)
     )
@@ -1041,17 +1051,23 @@ struct NeuralRenderingPostBlock {
   }
 
   func callAsFunction(_ input: MLXArray, skip: MLXArray) -> MLXArray {
-    let upsampled = NeuralRenderingTransformerOperations.nearestUpsample2Crop(
-      input,
-      height: skip.shape[1],
-      width: skip.shape[2]
-    )
-    let merged = NeuralRenderingTransformerOperations.postMerge(
-      upsampled,
-      skip: skip,
-      sine: sine,
-      cosine: cosine
-    )
+    let merged: MLXArray
+    if NeuralRenderingFusedGlue.canMerge(low: input, skip: skip) {
+      merged = NeuralRenderingFusedGlue.upsampleMerge(
+        low: input, skip: skip, lowScale: sine, skipScale: cosine, publish: false)
+    } else {
+      let upsampled = NeuralRenderingTransformerOperations.nearestUpsample2Crop(
+        input,
+        height: skip.shape[1],
+        width: skip.shape[2]
+      )
+      merged = NeuralRenderingTransformerOperations.postMerge(
+        upsampled,
+        skip: skip,
+        sine: sine,
+        cosine: cosine
+      )
+    }
     let features = windowBlock(merged)
     let first = features[0..., 0..., 0..., 0..<16]
     let second = features[0..., 0..., 0..., 16..<32]
@@ -1195,6 +1211,13 @@ struct NeuralRenderingEncoderStem {
     // high-pass correlation 0.52 -> 0.94; five native crops: 0.0073-0.0113
     // -> 0.0037-0.0046).
     let block0Output = pre.transform(pre.project(input))
+    if NeuralRenderingFusedGlue.canPool(block0Output) {
+      let published = NeuralRenderingFusedGlue.publishAndPool(block0Output, emitFull: true)
+      return NeuralRenderingEncoderStemOutput(
+        fullResolutionSkip: published.full,
+        skip: blocks(published.pooled)
+      )
+    }
     let fullResolutionSkip = NeuralRenderingTransformerOperations.e4m3RoundTrip(
       block0Output
     )
@@ -1256,9 +1279,12 @@ struct NeuralRenderingDownsampleBlock {
         multiple: NeuralRenderingGraphContract.windowSize
       )
       : transformed
-    let pooled = NeuralRenderingTransformerOperations.e4m3RoundTrip(
-      NeuralRenderingTransformerOperations.averagePool2(downsampleInput)
-    )
+    let pooled =
+      NeuralRenderingFusedGlue.canPool(downsampleInput)
+      ? NeuralRenderingFusedGlue.publishAndPool(downsampleInput, emitFull: false).pooled
+      : NeuralRenderingTransformerOperations.e4m3RoundTrip(
+        NeuralRenderingTransformerOperations.averagePool2(downsampleInput)
+      )
     return NeuralRenderingTransformerOperations.e4m3RoundTrip(matmul(pooled, weight))
   }
 }
@@ -2001,7 +2027,8 @@ enum NeuralRenderingTransformerOperations {
     precondition(input.ndim == 4)
     precondition(windowOrigin.y <= 0 && windowOrigin.y > -windowSize)
     precondition(windowOrigin.x <= 0 && windowOrigin.x > -windowSize)
-    if fusedAttention, preciseSoftmax, windowSize == NeuralRenderingFusedWindowAttention.windowSize,
+    if fusedAttention, fusedAttentionEnabled, fusedAttentionHeadCounts?.contains(headCount) ?? true,
+      preciseSoftmax, windowSize == NeuralRenderingFusedWindowAttention.windowSize,
       input.shape[0] == 1, input.dtype == .float16, input.shape[3] == headCount * 32
     {
       // Same numerics as the padded per-operation path: the projection GEMM on
@@ -2317,6 +2344,14 @@ enum NeuralRenderingTransformerOperations {
   /// tile kernels.
   nonisolated(unsafe) static var denseFeedForwardEnabled: Bool =
     ProcessInfo.processInfo.environment["NRK_DENSE_FFN"] != "0"
+  /// Diagnostics toggles (`NRK_FUSED_ATTENTION=0`, `NRK_FUSED_RESIDUAL=0`).
+  nonisolated(unsafe) static var fusedAttentionEnabled: Bool =
+    ProcessInfo.processInfo.environment["NRK_FUSED_ATTENTION"] != "0"
+  nonisolated(unsafe) static var fusedResidualEnabled: Bool =
+    ProcessInfo.processInfo.environment["NRK_FUSED_RESIDUAL"] != "0"
+  /// Diagnostics: head counts allowed to use the fused attention core (`NRK_FUSED_ATTENTION_HEADS=2,4`).
+  nonisolated(unsafe) static var fusedAttentionHeadCounts: Set<Int>? =
+    ProcessInfo.processInfo.environment["NRK_FUSED_ATTENTION_HEADS"].map { Set($0.split(separator: ",").compactMap { Int($0) }) }
 
   private static let quadraticGatePublishKernel = MLXFast.metalKernel(
     name: "nrk_quadratic_gate_publish",
@@ -2344,7 +2379,7 @@ enum NeuralRenderingTransformerOperations {
     precondition(input.dtype == .float16 && input.size.isMultiple(of: 4))
     let count = input.size / 4
     return quadraticGatePublishKernel(
-      [input, MLXArray([UInt32(count)])],
+      [input, NeuralRenderingKernelParameters.array([UInt32(count)])],
       grid: (count, 1, 1),
       threadGroup: (min(count, 256), 1, 1),
       outputShapes: [input.shape],
@@ -2438,7 +2473,7 @@ enum NeuralRenderingTransformerOperations {
     // Published as E4M3 before the attention reads it (multi-head kernels only;
     // the single-head window block keeps its residual in fp16 registers).
     let feedForwardOutput =
-      fusedAttention && input.dtype == .float16 && feedForwardBranch.dtype == .float16
+      fusedAttention && fusedResidualEnabled && input.dtype == .float16 && feedForwardBranch.dtype == .float16
       ? NeuralRenderingFusedWindowAttention.cosineResidual(
         skip: input, branch: feedForwardBranch, cosine: feedForwardCosine, publish: true)
       : e4m3RoundTrip(
@@ -2570,8 +2605,7 @@ enum NeuralRenderingTransformerOperations {
     precondition(feedForwardProjectionWeight.shape == [channels, channels])
 
     // The group MLP runs as batched matmuls in both execution modes; the
-    // `fusedFeedForward` flag is kept for call-site compatibility.
-    _ = fusedFeedForward
+    // `fusedFeedForward` flag selects the fused window attention core.
     let feedForwardInput = splitGroupFeedForward(
       input,
       firstProjectionWeight: firstProjectionWeight,
@@ -2596,7 +2630,8 @@ enum NeuralRenderingTransformerOperations {
       headCount: headCount,
       windowSize: windowSize,
       windowOrigin: windowOrigin,
-      preciseSoftmax: preciseSoftmax
+      preciseSoftmax: preciseSoftmax,
+      fusedAttention: fusedFeedForward
     )
     return cosineResidual(
       skip: feedForwardOutput,

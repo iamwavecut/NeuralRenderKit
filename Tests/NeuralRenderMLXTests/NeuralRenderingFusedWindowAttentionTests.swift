@@ -33,7 +33,7 @@ final class NeuralRenderingFusedWindowAttentionTests: XCTestCase {
   }
 
   func testFusedAttentionMatchesPerOperationPath() {
-    for (headCount, height, width) in [(2, 24, 40), (4, 24, 40), (8, 16, 24), (2, 19, 37), (4, 13, 27), (8, 11, 21)] {
+    for (headCount, height, width) in [(2, 24, 40), (4, 24, 40), (8, 16, 24), (16, 16, 24), (2, 19, 37), (4, 13, 27), (8, 11, 21), (16, 9, 13)] {
       for origin in [NeuralRenderingWindowOrigin.zero, NeuralRenderingWindowOrigin(y: -4, x: -4), NeuralRenderingWindowOrigin(y: 0, x: -4), NeuralRenderingWindowOrigin(y: -4, x: 0)] {
         let (fused, reference) = synthetic(headCount: headCount, height: height, width: width, origin: origin, seed: UInt64(headCount * 1000 + height * 10 + width))
         let delta = abs(fused.asType(.float32) - reference.asType(.float32))
@@ -73,6 +73,52 @@ final class NeuralRenderingFusedWindowAttentionTests: XCTestCase {
     }
   }
 
+  /// Opt-in stress loop: `NRK_ATTENTION_STRESS=ITERATIONS` runs the fused
+  /// attention core repeatedly at the 1080p family shapes to expose faults.
+  func testFusedAttentionStressWhenConfigured() throws {
+    let environment = ProcessInfo.processInfo.environment
+    guard let iterationsText = environment["NRK_ATTENTION_STRESS"], let iterations = Int(iterationsText) else {
+      throw XCTSkip("set NRK_ATTENTION_STRESS=ITERATIONS")
+    }
+    let shapes: [(Int, Int, Int)] = [(2, 272, 480), (4, 136, 240), (8, 68, 120), (16, 36, 60)]
+    let origins = [NeuralRenderingWindowOrigin.zero, NeuralRenderingWindowOrigin(y: -4, x: -4), NeuralRenderingWindowOrigin(y: 0, x: -4), NeuralRenderingWindowOrigin(y: -4, x: 0)]
+    for (headCount, height, width) in shapes {
+      let channels = headCount * 32
+      MLXRandom.seed(UInt64(headCount))
+      let qkvWeight = (MLXRandom.normal([channels, channels * 3]) * 0.08).asType(.float16)
+      let projectionWeight = (MLXRandom.normal([channels, channels]) * 0.08).asType(.float16)
+      let scale = (MLXRandom.uniform(low: 0.5, high: 2.0, [headCount])).asType(.float16)
+      let bias = (MLXRandom.normal([headCount, 64, 64]) * 2.0).asType(.float16)
+      eval(qkvWeight, projectionWeight, scale, bias)
+      var checksum: Float = 0
+      for iteration in 0..<iterations {
+        let input = (MLXRandom.normal([1, height, width, channels]) * 0.5).asType(.float16)
+        let origin = origins[iteration % origins.count]
+        let out = NeuralRenderingTransformerOperations.windowAttention(
+          input, qkvWeight: qkvWeight, attentionScale: scale, attentionBias: bias, projectionWeight: projectionWeight,
+          headCount: headCount, windowSize: 8, windowOrigin: origin, preciseSoftmax: true, fusedAttention: true)
+        checksum += abs(out).asType(.float32).mean().item(Float.self)
+        if environment["NRK_ATTENTION_STRESS_CLEAR"] != nil { GPU.clearCache() }
+      }
+      print("attention-stress \(headCount)h \(height)x\(width): \(iterations) iterations ok, checksum \(checksum)")
+    }
+  }
+
+  /// Opt-in: `NRK_ATTENTION_LARGE=1` compares both paths on synthetic weights
+  /// at the 1080p family shapes and counts non-finite outputs.
+  func testFusedAttentionLargeSyntheticWhenConfigured() throws {
+    guard ProcessInfo.processInfo.environment["NRK_ATTENTION_LARGE"] != nil else { throw XCTSkip("set NRK_ATTENTION_LARGE=1") }
+    for (headCount, height, width) in [(2, 272, 480), (4, 136, 240), (8, 68, 120), (16, 36, 60)] {
+      for origin in [NeuralRenderingWindowOrigin.zero, NeuralRenderingWindowOrigin(y: -4, x: -4)] {
+        let (fused, reference) = synthetic(headCount: headCount, height: height, width: width, origin: origin, seed: 99)
+        let f32 = fused.asType(.float32), r32 = reference.asType(.float32)
+        let finiteF = isFinite(f32).asType(.int32).sum().item(Int32.self), finiteR = isFinite(r32).asType(.int32).sum().item(Int32.self)
+        let delta = abs(f32 - r32)
+        print("attention-large \(headCount)h \(height)x\(width) origin (\(origin.x),\(origin.y)): non-finite fused \(f32.size - Int(finiteF)) reference \(f32.size - Int(finiteR)) | max |Δ| \(delta.max().item(Float.self)) mean |Δ| \(delta.mean().item(Float.self)) | mean |ref| \(abs(r32).mean().item(Float.self))")
+      }
+    }
+  }
+
   func testFusedAttentionOnExternalWeightsWhenConfigured() throws {
     let environment = ProcessInfo.processInfo.environment
     guard let weightsPath = environment["NRK_LOGICAL_WEIGHTS"], let spec = environment["NRK_FUSED_ATTENTION_TIMING"] else {
@@ -85,11 +131,14 @@ final class NeuralRenderingFusedWindowAttentionTests: XCTestCase {
       let block = Int(fields[0])!, headCount = Int(fields[1])!
       let shape = fields[2].split(separator: "x").compactMap { Int($0) }
       let channels = headCount * 32
-      let prefix = "block\(block).layer0"
-      let qkvWeight = try weights.required("\(prefix).qkv_weight")
-      let projectionWeight = try weights.required("\(prefix).projection_weight")
-      let scale = try weights.required("\(prefix).attn_scale")
-      let storedBias = try weights.required("\(prefix).attn_bias")
+      // Window families keep attention in layer0; the split families in layer2/layer3.
+      let split = headCount == 16
+      let attentionPrefix = split ? "block\(block).layer2" : "block\(block).layer0"
+      let projectionPrefix = split ? "block\(block).layer3" : "block\(block).layer0"
+      let qkvWeight = try weights.required("\(attentionPrefix).qkv_weight")
+      let projectionWeight = try weights.required("\(projectionPrefix).projection_weight")
+      let scale = try weights.required("\(attentionPrefix).attn_scale")
+      let storedBias = try weights.required("\(attentionPrefix).attn_bias")
       let bias = NeuralRenderingAttentionBiasLayout.usesFragmentSwizzle(blockIndex: block, headCount: headCount)
         ? NeuralRenderingAttentionBiasLayout.recoverFragmentSwizzle(storedBias) : storedBias
       let origin = NeuralRenderingGraphContract.windowOrigin(for: block)

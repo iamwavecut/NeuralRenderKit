@@ -45,6 +45,7 @@ final class NeuralRenderingStageTimingTests: XCTestCase {
       [1, height, width, 16]
     ).asType(.float16)
 
+    let checksums = environment["NRK_STAGE_CHECKSUMS"] != nil
     func timed(_ label: String, _ body: () -> [MLXArray]) -> [MLXArray] {
       let clock = ContinuousClock()
       let start = clock.now
@@ -54,11 +55,18 @@ final class NeuralRenderingStageTimingTests: XCTestCase {
       let milliseconds =
         Double(duration.components.seconds) * 1_000
         + Double(duration.components.attoseconds) / 1e15
-      print("stage-timing \(label): \(String(format: "%.1f", milliseconds)) ms")
+      if checksums {
+        let sums = outputs.map { abs($0.asType(.float32)).sum().item(Float.self) }
+        print("stage-timing \(label): \(String(format: "%.1f", milliseconds)) ms checksum \(sums)")
+      } else {
+        print("stage-timing \(label): \(String(format: "%.1f", milliseconds)) ms")
+      }
       return outputs
     }
 
-    for iteration in 0..<2 {
+    let iterations = Int(environment["NRK_STAGE_ITERATIONS"] ?? "2") ?? 2
+    for iteration in 0..<iterations {
+      if environment["NRK_STAGE_CLEAR"] != nil { GPU.clearCache() }
       print("stage-timing iteration \(iteration) shape \(height)x\(width)")
       let encoded = timed("encoder blocks 0-22") { [encoder(input).latent] }
       let encoderOutput = Device.withDefaultDevice(.gpu) { encoder(input) }
@@ -78,6 +86,7 @@ final class NeuralRenderingStageTimingTests: XCTestCase {
       _ = timed("post block 70") {
         [post(decoded[0], skip: encoderOutput.fullResolutionSkip)]
       }
+      print("stage-timing iteration \(iteration) done")
       Memory.clearCache()
     }
   }
