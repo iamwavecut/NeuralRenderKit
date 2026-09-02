@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "neuralrenderkit"
+version = "0.1.0"
+description = "PyTorch inference pipeline and bring-your-own-DLL weight tooling for the recovered neural-rendering transformer"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+dependencies = ["numpy", "torch>=2.1", "safetensors>=0.4", "pillow"]
+
+[project.optional-dependencies]
+coreml = ["coremltools>=8"]
+video = ["opencv-python-headless>=4.8"]
+
+[project.scripts]
+nrk-torch = "neuralrenderkit.cli:main"
+nrk-weights = "neuralrenderkit.tools.cli:main"
+nrk-video = "neuralrenderkit.video_cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["neuralrenderkit*"]
+
+[tool.setuptools.package-data]
+neuralrenderkit = ["*.json"]

@@ -1,0 +1,12 @@
+.build/
+.swiftpm/
+.DS_Store
+.worktrees/
+*.xcresult
+__pycache__/
+*.py[cod]
+tmp/
+docs/handover/
+.lab/
+*.egg-info/
+python/build/

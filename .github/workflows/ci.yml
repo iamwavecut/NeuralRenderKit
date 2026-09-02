@@ -1,0 +1,116 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Apple Silicon reference inference
+    runs-on: macos-26
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Select Swift 6.2 toolchain
+        shell: bash
+        run: |
+          xcode_app="$(find /Applications -maxdepth 1 -type d -name 'Xcode_26*.app' -print | sort | tail -1)"
+          if [[ -z "$xcode_app" ]]; then
+            echo "No Xcode 26 installation is available" >&2
+            exit 1
+          fi
+          sudo xcode-select --switch "$xcode_app/Contents/Developer"
+          swift --version
+          uname -m
+          test "$(uname -m)" = "arm64"
+
+      - name: Verify package, Metal inference, and public tree
+        shell: bash
+        run: scripts/verify.sh
+
+      - name: Select Python 3.12
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Verify optional PyTorch and Core ML tools
+        shell: bash
+        run: |
+          python3.12 -m venv .build/ci-python
+          .build/ci-python/bin/python -m pip install \
+            'torch==2.7.0' 'numpy<2' safetensors 'coremltools==9.0' pillow
+          .build/ci-python/bin/python -m unittest \
+            Tests/ToolsTests/test_neural_rendering_reference.py \
+            Tests/ToolsTests/test_convert_neural_rendering_coreml.py
+
+  python:
+    name: Python package (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-15]
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Select Python 3.12
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Install the package with CPU PyTorch
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          if [[ "${{ runner.os }}" == "macOS" ]]; then
+            python -m pip install 'torch==2.7.0'
+          else
+            python -m pip install 'torch==2.7.0' --index-url https://download.pytorch.org/whl/cpu
+          fi
+          python -m pip install 'numpy<2' safetensors pillow
+          if [[ "${{ runner.os }}" != "Windows" ]]; then
+            python -m pip install 'coremltools==9.0'
+          fi
+          python -m pip install ./python
+
+      - name: Package unit tests
+        shell: bash
+        run: python -m unittest discover -s python -t python -p 'test_*.py'
+
+      - name: Weight tooling and reference tests through the Tools shims
+        shell: bash
+        run: |
+          python -m unittest \
+            Tests/ToolsTests/test_extract_dlssnr_weights.py \
+            Tests/ToolsTests/test_unpack_dlssnr_weights.py \
+            Tests/ToolsTests/test_package_neural_rendering_transformer.py \
+            Tests/ToolsTests/test_neural_rendering_reference.py \
+            Tests/ToolsTests/test_attention_bias_layout.py
+          if [[ "${{ runner.os }}" != "Windows" ]]; then
+            python -m unittest Tests/ToolsTests/test_convert_neural_rendering_coreml.py
+          fi
+
+      - name: Command-line entry points
+        shell: bash
+        run: |
+          nrk-weights --help
+          nrk-torch run --help
