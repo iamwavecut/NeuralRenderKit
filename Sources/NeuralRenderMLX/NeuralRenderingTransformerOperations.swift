@@ -192,6 +192,8 @@ enum NeuralRenderingGraphContract {
 
 struct NeuralRenderingWindowBlock {
   private let body: (MLXArray) -> MLXArray
+  /// Single-kernel path (32 channels, one head) with the publication folded in.
+  private let fusedBody: ((MLXArray, Bool) -> MLXArray)?
   private let publishesOutput: Bool
 
   init(
@@ -200,8 +202,7 @@ struct NeuralRenderingWindowBlock {
     channels: Int,
     hiddenChannels: Int,
     headCount: Int,
-    compileBlock: Bool = false,
-    fastSoftmax: Bool = false
+    compileBlock: Bool = false
   ) throws {
     let prefix = "block\(blockIndex).layer0"
     let windowOrigin = NeuralRenderingGraphContract.windowOrigin(for: blockIndex)
@@ -233,6 +234,7 @@ struct NeuralRenderingWindowBlock {
       weights, name: "\(prefix).attn_cos_skip", shape: [channels]
     )
     let operation: (MLXArray) -> MLXArray
+    var fusedWindow: ((MLXArray, Bool) -> MLXArray)?
     if channels >= 64 {
       let expansionWeight = try Self.require(
         weights, name: "\(prefix).ffn_expand_weight",
@@ -290,15 +292,38 @@ struct NeuralRenderingWindowBlock {
           fusedFeedForward: compileBlock
         )
       }
+      if compileBlock, channels == NeuralRenderingFusedWindowBlock.channels,
+        hiddenChannels == NeuralRenderingFusedWindowBlock.hiddenChannels, headCount == 1
+      {
+        fusedWindow = { input, publish in
+          NeuralRenderingFusedWindowBlock.apply(
+            input,
+            expansionWeight: expansionWeight,
+            feedForwardProjectionWeight: feedForwardProjectionWeight,
+            feedForwardCosine: feedForwardCosine,
+            qkvWeight: qkvWeight,
+            attentionScale: attentionScale,
+            attentionBias: attentionBias,
+            attentionProjectionWeight: attentionProjectionWeight,
+            attentionCosine: attentionCosine,
+            windowOrigin: windowOrigin,
+            publish: publish
+          )
+        }
+      }
     }
     // MLX compile currently changes custom vendor-kernel semantics.
     self.body = operation
+    self.fusedBody = fusedWindow
     // Block 0 is average-pooled before its single E4M3 publication and block 70
     // feeds the output head directly.
     self.publishesOutput = blockIndex != 0 && blockIndex != 70
   }
 
   func callAsFunction(_ input: MLXArray) -> MLXArray {
+    if let fusedBody, input.dtype == .float16, input.shape[0] == 1 {
+      return fusedBody(input, publishesOutput)
+    }
     let output = body(input)
     return publishesOutput
       ? NeuralRenderingTransformerOperations.e4m3RoundTrip(output)
@@ -309,7 +334,10 @@ struct NeuralRenderingWindowBlock {
   /// kernels that pool the half-precision result (vendor transition captures:
   /// 0.010-0.021 versus 0.026-0.031 when pooling the published tensor).
   func unpublished(_ input: MLXArray) -> MLXArray {
-    body(input)
+    if let fusedBody, input.dtype == .float16, input.shape[0] == 1 {
+      return fusedBody(input, false)
+    }
+    return body(input)
   }
 
   private static func require(
@@ -347,7 +375,7 @@ struct NeuralRenderingWindowSequence {
         channels: channels,
         hiddenChannels: hiddenChannels,
         headCount: headCount,
-        fastSoftmax: compileSequence
+        compileBlock: compileSequence
       )
     }
     let operation = { input in
@@ -1380,6 +1408,8 @@ enum NeuralRenderingTransformerOperations {
   /// 3.0 on each block); window-block kernels show no cap.
   static let globalAttentionLogitCap: Float = 3
   static let experimentalGlobalAttentionLogitCap: Float = globalAttentionLogitCap
+  static var e4m3MetalHeaderText: String { e4m3MetalHeader }
+
   private static let e4m3MetalHeader = #"""
     struct nrk_e4m3 {
       template <typename T>
