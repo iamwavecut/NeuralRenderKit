@@ -9,6 +9,12 @@ proprietary is included, downloaded or redistributed.
 NeuralRenderKit is independent software. It is not affiliated with, endorsed
 by, or a drop-in implementation of NVIDIA DLSS or any other proprietary product.
 
+![Input, NeuralRenderKit at default strength, and NeuralRenderKit at processing scale 2 with detail 2](docs/assets/neural-rendering-control.png)
+
+A native game render at 1408x1600, cropped 1:1 so the pixels are the real ones.
+Left is the input, middle is the recovered network at its defaults, right is
+`--processing-scale 2 --detail-strength 2`.
+
 ## Quick start: from the DLL to an enhanced image
 
 1. Take `nvngx_dlssnr.dll` from your NVIDIA driver or Streamline package
@@ -145,6 +151,66 @@ package tests alone.
 | Still images (`nrk render-image`, `nrk-torch run`) and raw tensors (`nrk run`) | Working |
 | Temporal reference (`nrk run-sequence`, Python `TemporalSession`) | Working; Swift and Python agree within `0.0014` MAE; end-to-end parity with NVIDIA's temporal path open |
 | Video conversion (`nrk-video`, FFmpeg decode/encode, audio copy) | Working; single-frame and temporal modes (optical-flow or engine motion, learned history blend) |
+| Frame generation | Measured on NVIDIA's library, not implemented here; see [Research](#research-frame-generation-and-super-resolution) |
+| Super resolution | Measured and rejected: it needs engine motion vectors and matching jitter, and loses to Lanczos on realistic content |
+
+## Research: frame generation and super resolution
+
+Neither belongs to this package today. Both were measured against NVIDIA's own
+libraries to decide what is worth the work, and the measurements are the reason
+one is on the roadmap and the other is not.
+
+### Frame generation: on the roadmap
+
+[![Input at half rate, the reconstruction and the real frames](docs/assets/frame-generation-validate.png)](docs/assets/frame-generation-validate.mp4)
+
+<video src="docs/assets/frame-generation-validate.mp4" controls loop muted width="720"></video>
+
+The test feeds a video's **even frames only** and keeps the odd ones hidden as
+ground truth, so every generated frame has a real frame to be scored against.
+Left is the halved input, middle is NVIDIA's reconstruction, right is the
+footage that was withheld. Five clips of different character, PSNR against the withheld
+frames:
+
+| clip | content | generated | frame duplication | 50/50 blend |
+| --- | --- | --- | --- | --- |
+| train | live footage, strong pan | 27.38 | 17.65 | 19.56 |
+| handheld | live footage, hand-held | 30.90 | 23.90 | 26.52 |
+| druid | generative video | 33.48 | 24.81 | 28.11 |
+| muse | screen recording with text | 32.11 | 20.80 | 24.01 |
+| fishes | generative, non-rigid motion | 38.89 | 28.30 | 33.89 |
+
+Between +7.0 and +11.3 dB over duplicating a frame, and between +4.4 and
++8.1 dB over blending, on every class of content. Single frames do fail: 14.3 dB
+on a cut in the screen recording and 14.7 dB on a hand-held jerk, which is where
+a scene-cut detector belongs. Motion vectors and depth turned out not to matter
+for video — zeroed, absurd and structured inputs all scored within 0.01 dB of
+real optical flow — so the input contract is just two colour frames. The vendor
+spends about a millisecond per 1080p frame on an RTX 5090 and uses no
+fixed-function hardware block, so there is nothing here that cannot run on
+Metal.
+
+### Super resolution: not worth porting
+
+DLSS Super Resolution is built for a game pipeline and falls apart without one.
+It expects motion vectors produced by the engine and a jitter sequence that
+matches them frame for frame; finished video and photographs have neither, and
+the conditions cannot be faked convincingly from the outside.
+
+Measured, not assumed. On real photographic content, upscaling a native-scale
+downsample and comparing against the original crop, it **lost to plain Lanczos
+in all thirty single-frame tests**, by 4.84 dB on average. Feeding it a
+sixteen-frame history with a TAA-style jitter sequence made it 2.5 to 3 dB
+*worse* still, and the accumulation was exhausted by the third frame. On real
+video with optical flow standing in for engine motion, it trailed by 1.85 dB at
+the first frame and by 4.87 dB by the twenty-fourth, the gap widening as history
+built up. A control run with deliberately absurd motion vectors changed 42.7% of
+the output pixels, which confirms the vectors were reaching the network and that
+the verdict is about the model, not about plumbing.
+
+So super resolution is out of scope here. For enlarging realistic content, an
+ordinary resampler is the better tool, and the detail pass in this package is
+the part that adds anything.
 
 ## Safety
 
