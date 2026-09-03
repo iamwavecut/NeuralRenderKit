@@ -151,7 +151,7 @@ package tests alone.
 | Still images (`nrk render-image`, `nrk-torch run`) and raw tensors (`nrk run`) | Working |
 | Temporal reference (`nrk run-sequence`, Python `TemporalSession`) | Working; Swift and Python agree within `0.0014` MAE; end-to-end parity with NVIDIA's temporal path open |
 | Video conversion (`nrk-video`, FFmpeg decode/encode, audio copy) | Working; single-frame and temporal modes (optical-flow or engine motion, learned history blend) |
-| Frame generation | Measured on NVIDIA's library, not implemented here; see [Research](#research-frame-generation-and-super-resolution) |
+| Frame generation | Measured on NVIDIA's library, not implemented here; 0.1–1.0 dB over ffmpeg `minterpolate`, open learned interpolators not yet compared; see [Research](#research-frame-generation-and-super-resolution) |
 | Super resolution | Measured and rejected: it needs engine motion vectors and matching jitter, and loses to Lanczos on realistic content |
 
 ## Research: frame generation and super resolution
@@ -164,7 +164,7 @@ one is on the roadmap and the other is not.
 
 [![Input at half rate, the reconstruction and the real frames](docs/assets/frame-generation-validate.png)](docs/assets/frame-generation-validate.mp4)
 
-<video src="docs/assets/frame-generation-validate.mp4" controls loop muted width="720"></video>
+*Click the panel for the video.*
 
 The test feeds a video's **even frames only** and keeps the odd ones hidden as
 ground truth, so every generated frame has a real frame to be scored against.
@@ -172,22 +172,38 @@ Left is the halved input, middle is NVIDIA's reconstruction, right is the
 footage that was withheld. Five clips of different character, PSNR against the withheld
 frames:
 
-| clip | content | generated | frame duplication | 50/50 blend |
-| --- | --- | --- | --- | --- |
-| train | live footage, strong pan | 27.38 | 17.65 | 19.56 |
-| handheld | live footage, hand-held | 30.90 | 23.90 | 26.52 |
-| druid | generative video | 33.48 | 24.81 | 28.11 |
-| muse | screen recording with text | 32.11 | 20.80 | 24.01 |
-| fishes | generative, non-rigid motion | 38.89 | 28.30 | 33.89 |
+| clip | content | NVIDIA FG | ffmpeg `minterpolate` | frame duplication | 50/50 blend |
+| --- | --- | --- | --- | --- | --- |
+| train | live footage, strong pan | 27.38 | 27.16 | 17.65 | 19.56 |
+| handheld | live footage, hand-held | 30.90 | 30.69 | 23.90 | 26.52 |
+| druid | generative video | 33.48 | 33.28 | 24.81 | 28.11 |
+| muse | screen recording with text | 32.11 | 31.15 | 20.80 | 24.01 |
+| fishes | generative, non-rigid motion | 38.89 | 38.75 | 28.30 | 33.89 |
 
-Between +7.0 and +11.3 dB over duplicating a frame, and between +4.4 and
-+8.1 dB over blending, on every class of content. Single frames do fail: 14.3 dB
-on a cut in the screen recording and 14.7 dB on a hand-held jerk, which is where
-a scene-cut detector belongs. Motion vectors and depth turned out not to matter
+Read the table against the right column. Over the trivial baselines the lead
+is 7 to 11 dB, which says only that interpolation works. Over ffmpeg's free
+motion-compensated `minterpolate` filter, run on the same withheld-frame
+protocol, the lead is 0.1 to 1.0 dB of PSNR — real, consistent across all five
+clips, and small. Looking at the frames does not widen it: on the hardest frame
+of the train clip, a pole crossing the foreground, both smear the pole and
+neither wins (19.1 against 19.4 dB), and median frames are indistinguishable at
+a glance. What the vendor clearly has is speed, three orders of magnitude of
+it: about a millisecond per 1080p frame on an RTX 5090 against a few frames per
+second on a CPU. Single frames do fail on both: a cut in the screen recording
+and a hand-held jerk drop to 14 to 17 dB, which is where a scene-cut detector
+belongs.
+
+What that means for this package: a port would be a large recovery effort for
+a network whose measured edge over a free filter is a fraction of a decibel, so
+it is only worth it if the network also beats the open learned interpolators
+(RIFE and its successors), which run on Apple Silicon today with published
+weights. That comparison has not been run yet and is the gate before any
+porting work; the likelier outcome is frame generation built on an open model,
+with the vendor's numbers kept as the reference to meet. Two facts already in hand make a
+port feasible if it passes: motion vectors and depth turned out not to matter
 for video — zeroed, absurd and structured inputs all scored within 0.01 dB of
-real optical flow — so the input contract is just two colour frames. The vendor
-spends about a millisecond per 1080p frame on an RTX 5090 and uses no
-fixed-function hardware block, so there is nothing here that cannot run on
+real optical flow, so the input contract is two colour frames — and the vendor
+uses no fixed-function hardware block, so there is nothing that cannot run on
 Metal.
 
 ### Super resolution: not worth porting
