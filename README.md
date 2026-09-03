@@ -151,7 +151,7 @@ package tests alone.
 | Still images (`nrk render-image`, `nrk-torch run`) and raw tensors (`nrk run`) | Working |
 | Temporal reference (`nrk run-sequence`, Python `TemporalSession`) | Working; Swift and Python agree within `0.0014` MAE; end-to-end parity with NVIDIA's temporal path open |
 | Video conversion (`nrk-video`, FFmpeg decode/encode, audio copy) | Working; single-frame and temporal modes (optical-flow or engine motion, learned history blend) |
-| Frame generation | Measured on NVIDIA's library, not implemented here; 0.1–1.0 dB over ffmpeg `minterpolate`, open learned interpolators not yet compared; see [Research](#research-frame-generation-and-super-resolution) |
+| Frame generation | Being ported; measured on NVIDIA's library at 0.1–1.0 dB over ffmpeg `minterpolate` on video, about 1 ms per 1080p frame on the vendor's GPU; see [Research](#research-frame-generation-and-super-resolution) |
 | Super resolution | Measured and rejected: it needs engine motion vectors and matching jitter, and loses to Lanczos on realistic content |
 
 ## Research: frame generation and super resolution
@@ -193,18 +193,15 @@ second on a CPU. Single frames do fail on both: a cut in the screen recording
 and a hand-held jerk drop to 14 to 17 dB, which is where a scene-cut detector
 belongs.
 
-What that means for this package: a port would be a large recovery effort for
-a network whose measured edge over a free filter is a fraction of a decibel, so
-it is only worth it if the network also beats the open learned interpolators
-(RIFE and its successors), which run on Apple Silicon today with published
-weights. That comparison has not been run yet and is the gate before any
-porting work; the likelier outcome is frame generation built on an open model,
-with the vendor's numbers kept as the reference to meet. Two facts already in hand make a
-port feasible if it passes: motion vectors and depth turned out not to matter
-for video — zeroed, absurd and structured inputs all scored within 0.01 dB of
-real optical flow, so the input contract is two colour frames — and the vendor
-uses no fixed-function hardware block, so there is nothing that cannot run on
-Metal.
+What that means for this package: NeuralRenderKit exists to run NVIDIA's
+networks on Apple Silicon, not to pick the best open interpolator, so frame
+generation is being ported on its own terms, and the table above is the honest
+expectation of what it will do to video. Where the port can stand out is the
+same place the vendor does — speed on the GPU it runs on. Two facts make the
+port tractable: motion vectors and depth turned out not to matter for video —
+zeroed, absurd and structured inputs all scored within 0.01 dB of real optical
+flow, so the input contract is two colour frames — and the vendor uses no
+fixed-function hardware block, so there is nothing that cannot run on Metal.
 
 ### Super resolution: not worth porting
 
