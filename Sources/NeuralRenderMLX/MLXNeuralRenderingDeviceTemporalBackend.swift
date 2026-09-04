@@ -247,7 +247,6 @@ public actor MLXNeuralRenderingDeviceTemporalBackend: NeuralRenderBackend {
   }
 
   private func hostTensor(_ array: MLXArray, shape: [Int]) throws -> HostTensor {
-    let values = array.asArray(Float.self)
     return try HostTensor(
       descriptor: TensorDescriptor(
         name: "color",
@@ -255,7 +254,7 @@ public actor MLXNeuralRenderingDeviceTemporalBackend: NeuralRenderBackend {
         dataType: .float32,
         layout: .nhwc
       ),
-      bytes: values.withUnsafeBytes { Data($0) }
+      bytes: contiguous(array.asType(.float32)).asData(access: .copy).data   // one host copy
     )
   }
 

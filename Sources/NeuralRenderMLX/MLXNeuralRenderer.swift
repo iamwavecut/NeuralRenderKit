@@ -132,11 +132,9 @@ public actor MLXNeuralRenderer: NeuralRenderBackend {
     guard let outputDescriptor = descriptors.first(where: { $0.name == "color" }) else {
       throw MLXBackendError.missingOutput("color")
     }
-    let outputValues = output.asArray(Float.self)
-    let outputBytes = outputValues.withUnsafeBytes { Data($0) }
     let outputTensor = try HostTensor(
       descriptor: outputDescriptor,
-      bytes: outputBytes
+      bytes: contiguous(output).asData(access: .copy).data   // one host copy
     )
 
     return try NeuralRenderResult(

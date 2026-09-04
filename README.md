@@ -138,7 +138,7 @@ middle = generator.generate(frame_a_uint8, frame_b_uint8, factor=2)[0]   # facto
 | Temporal path | Swift and Python agree within `0.0014` MAE per frame; parity with NVIDIA's temporal output not measured |
 | Frame generation | reproduces the library's output at `59.9` dB PSNR (max 3/255) on captured frames; five whole clips within `0.01–0.03` dB of the library (27.4–38.9 dB against withheld frames) |
 | Frame generation, speed (M2 Max, 960×540 / 1920×1080) | Metal float16 `6.3 / 21` ms per frame on the GPU, `6.4 / 25` ms through `nrk-video framegen --backend nrk`; PyTorch/MPS float16 `5.3 / 17` ms |
-| `nrk stream` (video, Metal) | about 4 fps at 512×448 on an M2 Max, identical to `nrk run-sequence` |
+| `nrk stream` (video, Metal) | about 11 fps at 512×448 on an M2 Max end to end (ffmpeg, optical flow and the pipe included; features generated on the GPU), identical to `nrk run-sequence` |
 
 Not included: DLSS Super Resolution (measured, loses to Lanczos on realistic
 content without engine motion vectors and jitter; see the note below) and the
