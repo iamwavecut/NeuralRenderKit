@@ -122,6 +122,8 @@ def build_parser() -> argparse.ArgumentParser:
     inspect.add_argument("packed", type=pathlib.Path)
     digest = commands.add_parser("sha256", help="print the SHA-256 and file version of a DLL and whether it is a known checkpoint")
     digest.add_argument("path", type=pathlib.Path)
+    framegen = commands.add_parser("extract-fg", help="libnvidia-ngx-dlssg.so -> dense frame generation safetensors for nrk-video / FrameGenerator")
+    framegen.add_argument("library", type=pathlib.Path); framegen.add_argument("destination", type=pathlib.Path)
     return parser
 
 
@@ -136,6 +138,10 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "inspect":
         return _inspect(args.packed)
+    if args.command == "extract-fg":
+        from .extract_dlssg_weights import main as extract_fg
+
+        return extract_fg([str(args.library), str(args.destination)])
     if args.command == "extract":
         return _extract(args.dll, args.destination, args.resource_blob)
     if args.command == "decode":

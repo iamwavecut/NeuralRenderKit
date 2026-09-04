@@ -10,6 +10,7 @@ from pathlib import Path
 from .features import PROFILES
 from .pipeline import PRECISIONS, NeuralRenderingPipeline
 from .video import DEFAULT_ENCODE_ARGS, PIXEL_FORMATS, ConvertOptions, VideoToolError, compare_command, convert, probe
+from .framegen_video import AUDIO_MODES, FrameGenOptions, interpolate_video
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -40,6 +41,18 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--audio", default="copy", choices=("copy", "none"))
     run.add_argument("--overwrite", action="store_true"); run.add_argument("--status-interval", type=float, default=60.0)
     run.add_argument("--ffmpeg", default=None); run.add_argument("--ffprobe", default=None)
+    fg = commands.add_parser("framegen", help="generate intermediate frames (DLSS frame generation port): higher frame rate or slow motion")
+    fg.add_argument("input", type=Path); fg.add_argument("output", type=Path)
+    fg.add_argument("--weights", type=Path, required=True, help="dense frame generation safetensors (from nrk-weights extract-fg)")
+    fg.add_argument("--mode", default="fps", choices=("fps", "slowmo"), help="fps: frame rate x factor, same duration; slowmo: same rate, duration x factor")
+    fg.add_argument("--factor", type=int, default=2, help="2 doubles (one generated frame per pair), 3 or 4 generate several phases")
+    fg.add_argument("--audio", default="copy", choices=AUDIO_MODES, help="copy the audio, stretch it to the slowed video (atempo, pitch kept) or drop it")
+    fg.add_argument("--device", default="auto"); fg.add_argument("--precision", default="reference", choices=("reference", "fast"))
+    fg.add_argument("--frames", type=int, default=None, help="stop after this many input frames")
+    fg.add_argument("--decode-args", default="", help="extra FFmpeg input options, quoted")
+    fg.add_argument("--encode-args", default=None, help=f"FFmpeg output options replacing the default: {' '.join(DEFAULT_ENCODE_ARGS)}")
+    fg.add_argument("--overwrite", action="store_true"); fg.add_argument("--status-interval", type=float, default=60.0)
+    fg.add_argument("--ffmpeg", default=None); fg.add_argument("--ffprobe", default=None)
     show = commands.add_parser("probe", help="print the video stream properties FFprobe reports")
     show.add_argument("input", type=Path); show.add_argument("--ffprobe", default=None)
     compare = commands.add_parser("compare", help="open the original and the processed video side by side in mpv")
@@ -60,6 +73,19 @@ def main(argv: list[str] | None = None) -> int:
             if args.print_only:
                 print(shlex.join(command)); return 0
             return subprocess.call(command)
+        if args.command == "framegen":
+            from .framegen import FrameGenerator
+
+            generator = FrameGenerator.from_safetensors(args.weights, device=args.device, precision=args.precision)
+            options = FrameGenOptions(
+                mode=args.mode, factor=args.factor, audio=args.audio, frame_limit=args.frames,
+                decode_args=shlex.split(args.decode_args), encode_args=None if args.encode_args is None else shlex.split(args.encode_args),
+                overwrite=args.overwrite, status_interval=args.status_interval,
+            )
+            result = interpolate_video(args.input, args.output, generator, options, ffmpeg=args.ffmpeg, ffprobe=args.ffprobe)
+            print(f"wrote {result.output} ({result.input_frames} -> {result.output_frames} frames, {result.width}x{result.height}, "
+                  f"{result.input_fps:.3f} -> {result.output_fps:.3f} fps, {result.output_frames / result.seconds if result.seconds else 0:.2f} fps on {generator.device})")
+            return 0
         pipeline = None
         if args.backend == "torch":
             if args.weights is None:

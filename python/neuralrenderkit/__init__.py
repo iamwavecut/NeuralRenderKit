@@ -5,9 +5,11 @@ from .composition import compose_detail, compose_head, resample
 from .pipeline import EnhanceResult, NeuralRenderingPipeline, NeuralRenderingSession, PreparedFrame, load_weights, resolve_device
 from .temporal import BLEND_SCALE, TemporalOptions, TemporalSession, compose_temporal, make_temporal_features, normalize_pixel_motion
 from .video import ConvertOptions, ConvertResult, VideoInfo, convert, probe
+from .framegen import FrameGenerator
 
 __version__ = "0.1.0"
 __all__ = [
+    "FrameGenerator",
     "PROFILES", "AutomaticMask", "NetworkGeometry", "deterministic_noise", "make_features",
     "compose_detail", "compose_head", "resample",
     "EnhanceResult", "NeuralRenderingPipeline", "NeuralRenderingSession", "PreparedFrame", "load_weights", "resolve_device",
