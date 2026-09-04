@@ -320,15 +320,16 @@ public enum NeuralRenderingFirstFramePreprocessor {
       mixed &* 0xfa6d_c5f9 &+ 0x4712_a88e
     )
 
-    let radiusA = sqrt(-2 * log(radiusAUniform))
-    let radiusB = sqrt(-2 * log(radiusBUniform))
+    // The same operation sequence as the Metal feature kernel (`NeuralRenderingNoiseMath`).
+    let radiusA = (-2 * NeuralRenderingNoiseMath.log(radiusAUniform)).squareRoot()
+    let radiusB = (-2 * NeuralRenderingNoiseMath.log(radiusBUniform)).squareRoot()
     let tau = Float(6.283_185_482_025_146_5)
     let angleA = tau * angleAUniform
     let angleB = tau * angleBUniform
     return (
-      halfRounded(radiusB * cos(angleA)),
-      halfRounded(radiusB * sin(angleA)),
-      halfRounded(radiusA * cos(angleB))
+      halfRounded(radiusB * NeuralRenderingNoiseMath.cos(angleA)),
+      halfRounded(radiusB * NeuralRenderingNoiseMath.sin(angleA)),
+      halfRounded(radiusA * NeuralRenderingNoiseMath.cos(angleB))
     )
   }
 

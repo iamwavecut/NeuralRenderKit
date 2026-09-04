@@ -19,6 +19,9 @@ public actor MLXNeuralRenderingDeviceTemporalBackend: NeuralRenderBackend {
   private let featureControls: NeuralRenderingFeatureControls
   private let geometryPolicy: NeuralRenderingNetworkGeometryPolicy
   private let temporalProcessor = MLXTemporalFeatureProcessor()
+  private let baseFeatureProcessor = MLXFirstFrameFeatureProcessor()
+  /// `NRK_NR_DEVICE_FEATURES=0` builds the base features with the CPU preprocessor and uploads them (diagnostics).
+  nonisolated(unsafe) static var deviceFeaturesEnabled: Bool = ProcessInfo.processInfo.environment["NRK_NR_DEVICE_FEATURES"] != "0"
   private let postprocessor: MLXTemporalPostprocessor
   private var tracker = TemporalLifecycleTracker()
   private var history: MLXArray?
@@ -117,26 +120,15 @@ public actor MLXNeuralRenderingDeviceTemporalBackend: NeuralRenderBackend {
         outputWidth: logicalWidth,
         outputHeight: logicalHeight
       )
-      let baseFeatureTensor = try NeuralRenderingFirstFramePreprocessor.makeFeatureTensor(
-        from: color,
-        noiseFrameIndex: noiseFrameIndex,
-        geometry: geometry,
-        normalizedStyle: featureControls.normalizedStyle,
-        localToneStrength: featureControls.localToneStrength,
-        localStructureStrength: featureControls.localStructureStrength,
-        automaticMask: featureControls.automaticMask,
-        controlMask: controlMask
-      )
-      let networkBaseFeatures = array(baseFeatureTensor)
-      let logicalBaseFeatures =
-        geometry.isIdentity
-        ? networkBaseFeatures
-        : networkBaseFeatures[0..., 0..<logicalHeight, 0..<logicalWidth, 0...]
       let features: MLXArray
       let networkFeatures: MLXArray
-      if let history {
+      if Self.deviceFeaturesEnabled, let history, geometry.isIdentity {
+        // Base features and the reprojected history in one kernel; nothing but the
+        // colour, motion and depth crosses the host boundary.
         features = temporalProcessor(
-          baseFeatures: logicalBaseFeatures,
+          color: colorArray,
+          controlMask: controlMaskArray,
+          noiseFrameIndex: noiseFrameIndex,
           history: history,
           historyTransform: historyTransform,
           motion: array(motion),
@@ -146,17 +138,61 @@ public actor MLXNeuralRenderingDeviceTemporalBackend: NeuralRenderBackend {
           depthGuideMode: .observedZeroDescriptor,
           featureControls: featureControls
         )
-        networkFeatures =
-          geometry.isIdentity
-          ? features
-          : extendToNetworkExtent(
-            features,
-            networkBaseFeatures: networkBaseFeatures,
-            geometry: geometry
-          )
+        networkFeatures = features
       } else {
-        features = logicalBaseFeatures
-        networkFeatures = networkBaseFeatures
+        let networkBaseFeatures: MLXArray
+        if Self.deviceFeaturesEnabled {
+          // The base features at the network extent from the colour gathered onto it
+          // (the noise is a function of the network pixel, as in the CPU preprocessor).
+          let extendedColor = geometry.isIdentity ? colorArray : extendColor(colorArray, geometry: geometry)
+          let extendedMask = controlMaskArray.map { geometry.isIdentity ? $0 : extendColor($0, geometry: geometry) }
+          networkBaseFeatures = baseFeatureProcessor(
+            color: extendedColor,
+            controlMask: extendedMask,
+            noiseFrameIndex: noiseFrameIndex,
+            featureControls: featureControls
+          )
+        } else {
+          let baseFeatureTensor = try NeuralRenderingFirstFramePreprocessor.makeFeatureTensor(
+            from: color,
+            noiseFrameIndex: noiseFrameIndex,
+            geometry: geometry,
+            normalizedStyle: featureControls.normalizedStyle,
+            localToneStrength: featureControls.localToneStrength,
+            localStructureStrength: featureControls.localStructureStrength,
+            automaticMask: featureControls.automaticMask,
+            controlMask: controlMask
+          )
+          networkBaseFeatures = array(baseFeatureTensor)
+        }
+        let logicalBaseFeatures =
+          geometry.isIdentity
+          ? networkBaseFeatures
+          : networkBaseFeatures[0..., 0..<logicalHeight, 0..<logicalWidth, 0...]
+        if let history {
+          features = temporalProcessor(
+            baseFeatures: logicalBaseFeatures,
+            history: history,
+            historyTransform: historyTransform,
+            motion: array(motion),
+            motionTransform: motionTransform,
+            depth: array(depth),
+            depthInverted: depthInverted,
+            depthGuideMode: .observedZeroDescriptor,
+            featureControls: featureControls
+          )
+          networkFeatures =
+            geometry.isIdentity
+            ? features
+            : extendToNetworkExtent(
+              features,
+              networkBaseFeatures: networkBaseFeatures,
+              geometry: geometry
+            )
+        } else {
+          features = logicalBaseFeatures
+          networkFeatures = networkBaseFeatures
+        }
       }
       let preparedFeatures = MLXArrayTransfer(
         array: networkFeatures.asType(computePrecision.mlxDataType)
@@ -308,6 +344,12 @@ public actor MLXNeuralRenderingDeviceTemporalBackend: NeuralRenderBackend {
       ],
       axis: -1
     )
+  }
+
+  /// A logical `[1, H, W, C]` array gathered onto the network extent (reflect-then-clamp rows and columns).
+  private func extendColor(_ array: MLXArray, geometry: NeuralRenderingNetworkGeometry) -> MLXArray {
+    let indices = extensionIndices(for: geometry)
+    return array.take(indices.rows, axis: 1).take(indices.columns, axis: 2)
   }
 
   private func extensionIndices(
@@ -504,6 +546,75 @@ final class MLXFirstFrameFeatureProcessor: @unchecked Sendable {
       return float(half(value));
     }
 
+    // log, sin and cos from multiplications and additions only (Cephes), the same
+    // operation sequence as NeuralRenderingNoiseMath on the CPU: bit-identical noise.
+    METAL_FUNC float nrkLog(float x) {
+      uint bits = as_type<uint>(x);
+      float e = float(int((bits >> 23) & 0xffu) - 126);
+      float m = as_type<float>((bits & 0x807fffffu) | 0x3f000000u);
+      if (m < 0.707106781186547524f) { e -= 1.0f; m = m + m - 1.0f; } else { m = m - 1.0f; }
+      float z = m * m;
+      float y = 7.0376836292e-2f * m - 1.1514610310e-1f;
+      y = y * m + 1.1676998740e-1f;
+      y = y * m - 1.2420140846e-1f;
+      y = y * m + 1.4249322787e-1f;
+      y = y * m - 1.6668057665e-1f;
+      y = y * m + 2.0000714765e-1f;
+      y = y * m - 2.4999993993e-1f;
+      y = y * m + 3.3333331174e-1f;
+      y = y * m * z;
+      y = y + -2.12194440e-4f * e;
+      y = y + -0.5f * z;
+      float result = m + y;
+      result = result + 0.693359375f * e;
+      return result;
+    }
+
+    METAL_FUNC float nrkSinPoly(float z, float x) {
+      float y = -1.9515295891e-4f * z + 8.3321608736e-3f;
+      y = y * z - 1.6666654611e-1f;
+      y = y * z * x;
+      return y + x;
+    }
+
+    METAL_FUNC float nrkCosPoly(float z) {
+      float y = 2.443315711809948e-5f * z - 1.388731625493765e-3f;
+      y = y * z + 4.166664568298827e-2f;
+      y = y * z * z;
+      y = y - 0.5f * z;
+      return y + 1.0f;
+    }
+
+    METAL_FUNC float nrkSin(float input) {
+      float sign = 1.0f;
+      float x = input;
+      if (x < 0.0f) { x = -x; sign = -1.0f; }
+      int j = int(1.27323954473516f * x);
+      float y = float(j);
+      if (j & 1) { j += 1; y += 1.0f; }
+      j &= 7;
+      if (j > 3) { sign = -sign; j -= 4; }
+      x = ((x - y * 0.78515625f) - y * 2.4187564849853515625e-4f) - y * 3.77489497744594108e-8f;
+      float z = x * x;
+      float result = (j == 1 || j == 2) ? nrkCosPoly(z) : nrkSinPoly(z, x);
+      return sign < 0.0f ? -result : result;
+    }
+
+    METAL_FUNC float nrkCos(float input) {
+      float x = input < 0.0f ? -input : input;
+      int j = int(1.27323954473516f * x);
+      float y = float(j);
+      if (j & 1) { j += 1; y += 1.0f; }
+      j &= 7;
+      float sign = 1.0f;
+      if (j > 3) { j -= 4; sign = -sign; }
+      if (j > 1) { sign = -sign; }
+      x = ((x - y * 0.78515625f) - y * 2.4187564849853515625e-4f) - y * 3.77489497744594108e-8f;
+      float z = x * x;
+      float result = (j == 1 || j == 2) ? nrkSinPoly(z, x) : nrkCosPoly(z);
+      return sign < 0.0f ? -result : result;
+    }
+
     METAL_FUNC float nrkScaledColor(float value) {
       float sampled = nrkHalf(value);
       float centered = nrkHalf(sampled - 0.5f);
@@ -549,24 +660,14 @@ final class MLXFirstFrameFeatureProcessor: @unchecked Sendable {
       float angleAUniform = nrkUniform24(
         mixed * 0xfa6dc5f9u + 0x4712a88eu
       );
-      float radiusA = metal::precise::sqrt(
-        -2.0f * metal::precise::log(radiusAUniform)
-      );
-      float radiusB = metal::precise::sqrt(
-        -2.0f * metal::precise::log(radiusBUniform)
-      );
+      float radiusA = metal::precise::sqrt(-2.0f * nrkLog(radiusAUniform));
+      float radiusB = metal::precise::sqrt(-2.0f * nrkLog(radiusBUniform));
       float tau = 6.2831854820251465f;
       float angleA = tau * angleAUniform;
       float angleB = tau * angleBUniform;
-      output[featureOffset] = nrkHalf(
-        radiusB * metal::precise::cos(angleA)
-      );
-      output[featureOffset + 1] = nrkHalf(
-        radiusB * metal::precise::sin(angleA)
-      );
-      output[featureOffset + 2] = nrkHalf(
-        radiusA * metal::precise::cos(angleB)
-      );
+      output[featureOffset] = nrkHalf(radiusB * nrkCos(angleA));
+      output[featureOffset + 1] = nrkHalf(radiusB * nrkSin(angleA));
+      output[featureOffset + 2] = nrkHalf(radiusA * nrkCos(angleB));
       output[featureOffset + 3] = 1.0f;
 
       float red = nrkScaledColor(color[colorOffset]);

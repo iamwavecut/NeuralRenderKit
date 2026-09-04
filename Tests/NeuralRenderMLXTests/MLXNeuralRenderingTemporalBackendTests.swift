@@ -51,19 +51,11 @@ final class MLXNeuralRenderingTemporalBackendTests: XCTestCase {
     for pixel in 0..<4 {
       for channel in 0..<16 {
         let offset = pixel * 16 + channel
-        if channel < 3 {
-          XCTAssertLessThanOrEqual(
-            abs(actual[offset] - reference[offset]),
-            1 / 128,
-            "noise pixel \(pixel) channel \(channel)"
-          )
-        } else {
-          XCTAssertEqual(
-            actual[offset],
-            reference[offset],
-            "feature pixel \(pixel) channel \(channel)"
-          )
-        }
+        XCTAssertEqual(
+          actual[offset],
+          reference[offset],
+          "feature pixel \(pixel) channel \(channel)"
+        )
       }
     }
   }

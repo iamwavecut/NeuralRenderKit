@@ -62,14 +62,14 @@ the withheld frames, the vendor's library against this port (PyTorch, M2 Max):
 
 ## Speed
 
-Per generated frame on an M2 Max at steady state (kernel compilation and the
-first batch excluded), float16 unless noted:
+Per generated frame on an M2 Max after warm-up (kernel compilation excluded),
+float16 unless noted:
 
 | | 960×540 | 1920×1080 |
 | --- | --- | --- |
-| Metal, `nrk framegen`, one frame (N = 1) | 4.6 ms | 27 ms |
-| Metal, `nrk framegen --factor 4` (the three phases as one batch, N = 3) | 5.0 ms | 23 ms |
-| Metal, `nrk framegen-stream --batch 4` through the uint8 pipe (what `nrk-video framegen --backend nrk` uses) | 6.2 ms | 26 ms |
+| Metal, `nrk framegen`, one frame (N = 1) | 6.3 ms | 21 ms |
+| Metal, `nrk framegen --factor 4` (the three phases as one batch, N = 3) | 5.2 ms | 23 ms |
+| Metal, `nrk framegen-stream --batch 4` through the uint8 pipe (what `nrk-video framegen --backend nrk` uses) | 6.4 ms | 25 ms |
 | Metal, `nrk framegen-stream --batch 1`, float32 pipe (the previous protocol) | 27 ms | 43 ms |
 | Metal (float32, MLX convolutions) | 9.2 ms | 32 ms |
 | PyTorch / MPS (float16) | 5.3 ms | 17 ms |
@@ -78,9 +78,10 @@ first batch excluded), float16 unless noted:
 Every stage of the Swift port takes a batch (`[N, H, W, 3]` frames, one phase
 per sample): the phases of one pair (`--factor 3|4`) and the consecutive pairs
 of a video (`--batch`, default 4) run as one pass. Batching does not lower the
-GPU time per frame much (the layers are throughput-bound already at N = 1;
-1080p ×4 gains 16 %), but it lets the frame server overlap the host work with
-the GPU: with `--batch 1` the server waits for the host after every frame.
+GPU time per frame much (the layers are throughput-bound already at N = 1:
+540p gains 17 % at N = 3, 1080p nothing), but it lets the frame server overlap
+the host work with the GPU: with `--batch 1` the server waits for the host
+after every frame.
 The pipe carries uint8 RGB in both directions (`--format u8`, the default;
 `f32` keeps the float protocol), which took the host side of the stream from
 22 ms to under 2 ms per 540p frame; the frames are converted on the GPU.
