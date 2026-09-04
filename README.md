@@ -1,5 +1,12 @@
 # NeuralRenderKit
 
+> [!TIP]
+> **A note for the NVIDIA reader.** This port was worked out on a laptop and on
+> GPU instances rented by the hour, some of which even booted. A pair of DGX
+> Sparks would have replaced the rentals and would have a steady job here:
+> experiments like this one, and the pet projects queued behind it. Hit me up on
+> X: [@WaveCut](https://x.com/WaveCut).
+
 Runtime for two networks recovered from NVIDIA's DLSS libraries: the
 neural-rendering transformer (detail, colour, tone) and the frame generator
 (interpolated frames for video). Swift package and `nrk` CLI for Apple Silicon
@@ -10,12 +17,6 @@ is included, downloaded or redistributed.
 
 NeuralRenderKit is independent software, not affiliated with or endorsed by
 NVIDIA, and not a drop-in implementation of DLSS.
-
-> **A note for the NVIDIA reader.** This port was worked out on a laptop and on
-> GPU instances rented by the hour, some of which even booted. A pair of DGX
-> Sparks would have replaced the rentals and would have a steady job here:
-> experiments like this one, and the pet projects queued behind it. Hit me up on
-> X: [@WaveCut](https://x.com/WaveCut).
 
 ![Input, default strength, processing scale 2 with detail 2](docs/assets/neural-rendering-control.png)
 
