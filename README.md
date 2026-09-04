@@ -135,7 +135,7 @@ middle = generator.generate(frame_a_uint8, frame_b_uint8, factor=2)[0]   # facto
 | Neural rendering, Metal | `0.004–0.005` MAE against the NVIDIA DLL on 1152–1408 px game renders |
 | Neural rendering, PyTorch | within `0.002` MAE of the Metal port; ~15 s per 1152×1216 frame on an M2 Max (reference graph) |
 | Neural rendering, Core ML | `0.008–0.014` MAE against the DLL |
-| Temporal path | Swift and Python agree within `0.0014` MAE per frame; parity with NVIDIA's temporal output not measured |
+| Temporal path | Swift and Python agree within `0.0014` MAE per frame; against NVIDIA on a 64-frame static sequence: `0.0054` MAE (`42.3` dB) with the same drift from frame 0 as the vendor; motion, jitter and mask cases not captured |
 | Frame generation | reproduces the library's output at `59.9` dB PSNR (max 3/255) on captured frames; five whole clips within `0.01–0.03` dB of the library (27.4–38.9 dB against withheld frames) |
 | Frame generation, speed (M2 Max, 960×540 / 1920×1080) | Metal float16 `6.3 / 21` ms per frame on the GPU, `6.4 / 25` ms through `nrk-video framegen --backend nrk`; PyTorch/MPS float16 `5.3 / 17` ms |
 | `nrk stream` (video, Metal) | about 11 fps at 512×448 on an M2 Max end to end (ffmpeg, optical flow and the pipe included; features generated on the GPU), identical to `nrk run-sequence` |
