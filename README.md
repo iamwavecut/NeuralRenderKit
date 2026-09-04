@@ -162,7 +162,7 @@ package tests alone.
 | Still images (`nrk render-image`, `nrk-torch run`) and raw tensors (`nrk run`) | Working |
 | Temporal reference (`nrk run-sequence`, Python `TemporalSession`) | Working; Swift and Python agree within `0.0014` MAE; end-to-end parity with NVIDIA's temporal path open |
 | Video conversion (`nrk-video`, FFmpeg decode/encode, audio copy) | Working; single-frame and temporal modes (optical-flow or engine motion, learned history blend) |
-| Frame generation (`nrk-video framegen`, Python `FrameGenerator`) | Working in PyTorch (CPU/CUDA/MPS); reproduces NVIDIA's library output at `59.9` dB PSNR on captured frames and to `0.01–0.03` dB on five whole clips; 13–20 ms per frame on an M2 Max; Metal port next; see [Research](#research-frame-generation-and-super-resolution) |
+| Frame generation (`nrk framegen`, `nrk-video framegen`, Python `FrameGenerator`) | Working on Metal (Swift/MLX) and in PyTorch (CPU/CUDA/MPS); reproduces NVIDIA's library output at `59.9` dB PSNR on captured frames and to `0.01–0.03` dB on five whole clips; `5–8` ms per 960×540 frame on an M2 Max; see [Research](#research-frame-generation-and-super-resolution) |
 | Super resolution | Measured and rejected: it needs engine motion vectors and matching jitter, and loses to Lanczos on realistic content |
 
 ## Research: frame generation and super resolution
@@ -225,14 +225,20 @@ frame at **59.9 dB PSNR** (every pixel within 3/255) on the captured run and
 lands within 0.01–0.03 dB of the vendor column above on all five clips
 (27.39, 30.91, 33.49, 32.13, 38.92 dB). Any interpolation phase works, so
 `--factor 3` and `4` generate the same intermediate phases the vendor's
-multi-frame mode does. On an M2 Max through PyTorch/MPS a 960×540 frame takes
-5–6 ms of network time (17 ms at 1080p) — the Metal port of the same graph is
-the next step. Weights come from your own `libnvidia-ngx-dlssg.so` (DLSS SDK
-310.7.0), never from this repository:
+multi-frame mode does. The same graph runs on Metal through Swift/MLX (the
+convolutions in MLX, the warps and the output composition as custom kernels,
+the whole graph compiled), matching the PyTorch port within `7e-6` MAE at
+float16. On an M2 Max a 960×540 frame takes 7.5 ms on Metal and 5.3 ms through
+PyTorch/MPS (26 ms and 17 ms at 1080p) — real time either way, and Apple's
+tuned convolutions behind MPS still beat MLX's on these small layers. Weights
+come from your own `libnvidia-ngx-dlssg.so` (DLSS SDK 310.7.0), never from this
+repository:
 
 ```bash
 nrk-weights extract-fg libnvidia-ngx-dlssg.so.310.7.0 framegen.safetensors
+nrk framegen a.png b.png --weights framegen.safetensors --output between.png        # Metal, one frame (--factor 4 for three)
 nrk-video framegen input.mp4 doubled.mp4 --weights framegen.safetensors            # frame rate x2, audio copied
+nrk-video framegen input.mp4 doubled.mp4 --weights framegen.safetensors --backend nrk   # frames stream through nrk framegen-stream
 nrk-video framegen input.mp4 slow.mp4 --weights framegen.safetensors --mode slowmo --factor 4 --audio stretch
 ```
 

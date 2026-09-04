@@ -62,10 +62,23 @@ the withheld frames, the vendor's library against this port (PyTorch, M2 Max):
 
 ## Speed
 
-PyTorch on an M2 Max (MPS): 960×540 in 5.3 ms per generated frame at float16
-(6.3 ms at float32), 1920×1080 in 17 ms (22 ms). The Swift/MLX port runs the
-same graph on Metal with the warp and the output composition as custom
-kernels (`nrk framegen`).
+Per generated frame on an M2 Max, after warm-up:
+
+| | 960×540 | 1920×1080 |
+| --- | --- | --- |
+| Metal (Swift/MLX, float16, compiled graph) | 7.5 ms | 26 ms |
+| Metal (float32) | 9.2 ms | 32 ms |
+| PyTorch / MPS (float16) | 5.3 ms | 17 ms |
+| PyTorch / MPS (float32) | 6.3 ms | 22 ms |
+
+The Swift port (`nrk framegen`, `nrk framegen-stream`) keeps the convolutions
+in MLX and implements the bilinear ×2 upsample, the candidate warp and the
+output composition as custom Metal kernels; compiling the graph removed the
+per-operation overhead of the eager path (17.8 ms → 7.5 ms at 540p). What
+remains is the convolutions themselves: the synthesis networks run at 240×136
+and below with 16–64 channels, where MLX's convolution kernels trail the tuned
+MPS ones that PyTorch uses. Accuracy is unaffected: the two ports agree within
+`4e-8` MAE at float32 and `7e-6` at float16 on real weights.
 
 ## Not ported
 

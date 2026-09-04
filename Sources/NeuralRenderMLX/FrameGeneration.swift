@@ -38,7 +38,11 @@ public final class FrameGenerator {
   private let dtype: DType
   private let block0: Block
   private let block1: Block
-  private let upsample = Upsample(scaleFactor: 2.0, mode: .linear(alignCorners: false))
+  /// `NRK_FG_COMPILE=0` runs the eager graph (diagnostics).
+  nonisolated(unsafe) static var compileEnabled: Bool = ProcessInfo.processInfo.environment["NRK_FG_COMPILE"] != "0"
+  private lazy var compiledSynthesize: @Sendable ([MLXArray]) -> [MLXArray] = compile(shapeless: false) { [self] inputs in
+    [self.synthesizeGraph(inputs[0], inputs[1], phase: inputs[2])]
+  }
 
   /// Tensor names the dense weight file must contain.
   public static let tensorNames: [String] = {
@@ -159,18 +163,66 @@ public final class FrameGenerator {
         x = y + skip
       }
     }
-    let trunk = upsample(x)
+    let trunk = Self.upsample2(x)
     let heads = block.heads.map { Self.act(Self.conv(trunk, $0.0, $0.1)) }
     let spans = [(0, 4), (4, 5), (5, 8)]
     let outs = spans.enumerated().map { (i, span) -> MLXArray in
       let w = block.outWeight[span.0..<span.1]
       let b = block.outBias[span.0..<span.1]
-      return Self.conv(upsample(heads[i]), w, b)
+      return Self.conv(Self.upsample2(heads[i]), w, b)
     }
     return (outs[0], outs[1], outs[2])
   }
 
   // MARK: - Metal kernels
+
+  /// Bilinear x2 upsample with the half-pixel convention (PyTorch align_corners=False), NHWC.
+  private static let up2Kernel = MLXFast.metalKernel(
+    name: "nrk_fg_up2",
+    inputNames: ["input", "params"],
+    outputNames: ["out"],
+    source: #"""
+      // One thread per output pixel: params = [inHeight, inWidth, channels].
+      const uint index = thread_position_in_grid.x;
+      const int ih = int(params[0]);
+      const int iw = int(params[1]);
+      const uint channels = params[2];
+      const uint oh = uint(ih) * 2;
+      const uint ow = uint(iw) * 2;
+      if (index >= oh * ow) { return; }
+      const uint y = index / ow;
+      const uint x = index % ow;
+      const float sx = max((float(x) + 0.5f) * 0.5f - 0.5f, 0.0f);
+      const float sy = max((float(y) + 0.5f) * 0.5f - 0.5f, 0.0f);
+      const int x0 = min(int(sx), iw - 1);
+      const int y0 = min(int(sy), ih - 1);
+      const int x1 = min(x0 + 1, iw - 1);
+      const int y1 = min(y0 + 1, ih - 1);
+      const float tx = sx - float(x0);
+      const float ty = sy - float(y0);
+      for (uint c = 0; c < channels; ++c) {
+        const float v00 = float(input[(y0 * iw + x0) * channels + c]);
+        const float v01 = float(input[(y0 * iw + x1) * channels + c]);
+        const float v10 = float(input[(y1 * iw + x0) * channels + c]);
+        const float v11 = float(input[(y1 * iw + x1) * channels + c]);
+        out[index * channels + c] = (1 - tx) * (1 - ty) * v00 + tx * (1 - ty) * v01 + (1 - tx) * ty * v10 + tx * ty * v11;
+      }
+      """#
+  )
+
+  /// `[1,h,w,C]` -> `[1,2h,2w,C]`, bilinear, half-pixel centres.
+  static func upsample2(_ x: MLXArray) -> MLXArray {
+    let (h, w, c) = (x.dim(1), x.dim(2), x.dim(3))
+    let params = MLXArray([UInt32(h), UInt32(w), UInt32(c)])
+    let count = 4 * h * w
+    return up2Kernel(
+      [contiguous(x), params],
+      grid: (count, 1, 1),
+      threadGroup: (min(count, 256), 1, 1),
+      outputShapes: [[1, 2 * h, 2 * w, c]],
+      outputDTypes: [x.dtype]
+    )[0]
+  }
 
   /// Backward bilinear warp of an NHWC image by per-pixel offsets (in pixels), borders clamped.
   private static let warpKernel = MLXFast.metalKernel(
@@ -303,15 +355,23 @@ public final class FrameGenerator {
 
   /// Half-resolution export `[1, h, w, 8]`: flowA.xy, flowB.xy, mask logit, residual.rgb.
   public func synthesize(_ aFull: MLXArray, _ bFull: MLXArray, phase: Float) -> MLXArray {
+    let phaseArray = MLXArray(phase)
+    if Self.compileEnabled {
+      return compiledSynthesize([aFull, bFull, phaseArray])[0]
+    }
+    return synthesizeGraph(aFull, bFull, phase: phaseArray)
+  }
+
+  private func synthesizeGraph(_ aFull: MLXArray, _ bFull: MLXArray, phase: MLXArray) -> MLXArray {
     let a = Self.box2(aFull.asType(dtype))
     let b = Self.box2(bFull.asType(dtype))
     let err = Self.photometricError(a, b)
     let zero = MLXArray.zeros(err.shape, dtype: dtype)
-    let t = MLX.full(err.shape, values: MLXArray(phase)).asType(dtype)
+    let t = broadcast(phase.asType(dtype), to: err.shape)
     let candA = concatenated([a, err], axis: 3)
     let candB = concatenated([b, err], axis: 3)
     let (f0c, m0c, r0c) = run(block0, concatenated([candA, candB, zero, t], axis: 3))
-    let f0 = upsample(f0c), m0 = upsample(m0c), r0 = upsample(r0c)
+    let f0 = Self.upsample2(f0c), m0 = Self.upsample2(m0c), r0 = Self.upsample2(r0c)
     let warpedA = Self.warp(candA, flow: f0[0..., 0..., 0..., 0..<2] * 2)
     let warpedB = Self.warp(candB, flow: f0[0..., 0..., 0..., 2..<4] * 2)
     let (f1, m1, r1) = run(block1, concatenated([warpedA, warpedB, f0, m0, zero, r0, t], axis: 3))

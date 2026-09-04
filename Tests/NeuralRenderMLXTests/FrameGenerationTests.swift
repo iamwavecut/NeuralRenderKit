@@ -95,14 +95,20 @@ final class FrameGenerationTests: XCTestCase {
   }
 
   func testUpsampleMatchesHalfPixelConvention() {
-    // PyTorch bilinear x2 with align_corners=False: [0, 1] -> [0, 0.25, 0.75, 1]
+    // PyTorch bilinear x2 with align_corners=False: [0, 1] -> [0, 0.25, 0.75, 1] along the row
     let x = MLXArray([Float(0), 1], [1, 1, 2, 1])
-    let up = MLXNN.Upsample(scaleFactor: 2.0, mode: .linear(alignCorners: false))(x).asArray(Float.self)
+    let up = FrameGenerator.upsample2(x).asArray(Float.self)
     XCTAssertEqual(up.count, 8)
     XCTAssertEqual(up[0], 0, accuracy: 1e-6)
     XCTAssertEqual(up[1], 0.25, accuracy: 1e-6)
     XCTAssertEqual(up[2], 0.75, accuracy: 1e-6)
     XCTAssertEqual(up[3], 1, accuracy: 1e-6)
+    XCTAssertEqual(up[4], 0, accuracy: 1e-6, "the second output row repeats the single input row")
+    // agrees with MLXNN's linear upsample on random data
+    let r = random([1, 5, 7, 3], seed: 21)
+    let reference = MLXNN.Upsample(scaleFactor: 2.0, mode: .linear(alignCorners: false))(r).asArray(Float.self)
+    let mine = FrameGenerator.upsample2(r).asArray(Float.self)
+    XCTAssertEqual(zip(mine, reference).map { abs($0 - $1) }.max()!, 0, accuracy: 1e-5)
   }
 
   func testSyntheticEndToEndShapesAndConstantInvariance() throws {
