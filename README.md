@@ -133,7 +133,7 @@ the comparison clip and the folder.
 | option (`nrk run` / `nrk-torch run` / `nrk-video convert`) | default | effect |
 | --- | --- | --- |
 | `--profile standard\|natural\|cinematic\|neutral` | `standard` | style index and local tone/structure preset |
-| `--processing-scale 1–4` | `1` | run the network on the frame resampled by this factor |
+| `--processing-scale 1–4` | `1` | run the network on the frame resampled by this factor (memory and time grow with its square) |
 | `--detail-strength 0–8`, `--colour-strength 0–4`, `--detail-radius` | `1`, `1`, `4` | `result = input + colour·lowpass(change) + detail·highpass(change)` |
 | `--intensity 0–1` | `1` | blend of the enhanced result over the input |
 | `--control-mask rgb.f32` | none | red: blend, green: tone, blue: structure, per pixel |
@@ -155,7 +155,8 @@ middle = generator.generate(frame_a_uint8, frame_b_uint8, factor=2)[0]   # facto
 | component | measurement |
 | --- | --- |
 | Neural rendering, Metal | `0.004–0.005` MAE against the NVIDIA DLL on 1152–1408 px game renders |
-| Neural rendering, PyTorch | within `0.002` MAE of the Metal port; ~15 s per 1152×1216 frame on an M2 Max (reference graph) |
+| Neural rendering, PyTorch | within `0.002` MAE of the Metal port; ~8 s per 1440×1280 frame on an M2 Max (MPS, reference graph) |
+| Neural rendering, memory | PyTorch: about `1 GB` per megapixel of network input at float32 (1080p `2.0 GB`, 2560×2880 `5.5 GB`), half of that with `--precision fast`; the graph is evaluated in bounded chunks, so the peak does not depend on window count (`NRK_TORCH_CHUNK_TOKENS` sets the chunk, `0` disables). Metal: `2.2 GB` resident for a 3840×2160 frame |
 | Neural rendering, Core ML | `0.008–0.014` MAE against the DLL |
 | Temporal path | Swift and Python agree within `0.0014` MAE per frame; against NVIDIA on a 64-frame static sequence: `0.0054` MAE (`42.3` dB) with the same drift from frame 0 as the vendor; motion, jitter and mask cases not captured |
 | Frame generation | reproduces the library's output at `59.9` dB PSNR (max 3/255) on captured frames; five whole clips within `0.01–0.03` dB of the library (27.4–38.9 dB against withheld frames) |

@@ -43,6 +43,16 @@ def recovered_window_origin(block_index: int) -> tuple[int, int]:
     return ((0, -4, 0, -4)[phase % 4], (0, -4, -4, 0)[phase % 4])
 
 
+# Token-local work (feed-forward branches, residuals) and window attention are
+# evaluated in chunks of at most this many tokens, so the temporaries of a
+# block scale with the chunk and not with the frame: a 2560x2880 frame at
+# block 0 otherwise materialises 28k windows of 256x256 scores at once (tens of
+# GB). Chunking changes no arithmetic; every token and window sees the same
+# operations. ``NRK_TORCH_CHUNK_TOKENS=0`` disables it.
+CHUNK_TOKENS = int(os.environ.get("NRK_TORCH_CHUNK_TOKENS", str(1 << 18)))
+
+
+
 def quadratic_gate(value: torch.Tensor) -> torch.Tensor:
     clamped = value.to(torch.float16).clamp(-4, 4)
     linear = (
@@ -80,6 +90,15 @@ def e4m3_round_trip(value: torch.Tensor) -> torch.Tensor:
         return torch.where(value < 0, -rounded, rounded)
     if value.device.type in _FLOAT8_CAST_DEVICES and value.dtype == torch.float32:
         return value.clamp(-448, 448).to(torch.float8_e4m3fn).to(value.dtype)
+    if CHUNK_TOKENS > 0 and value.numel() > 8 * CHUNK_TOKENS:
+        # The bit-level path builds several int32/float32 temporaries per element;
+        # on a whole frame that is a multi-GB spike, so publish in slices.
+        flat = value.reshape(-1)
+        out = torch.empty_like(flat)
+        step = 8 * CHUNK_TOKENS
+        for start in range(0, flat.shape[0], step):
+            out[start : start + step] = e4m3_round_trip_bitwise(flat[start : start + step])
+        return out.reshape(value.shape)
     return e4m3_round_trip_bitwise(value)
 
 
@@ -125,6 +144,15 @@ def _round_half_even(value: torch.Tensor) -> torch.Tensor:
 # on each block (2.5 and 3.5 are worse); window-block kernels show no cap.
 GLOBAL_ATTENTION_LOGIT_CAP = 3.0
 EXPERIMENTAL_GLOBAL_ATTENTION_LOGIT_CAP = GLOBAL_ATTENTION_LOGIT_CAP
+
+def _per_token(function, value: torch.Tensor) -> torch.Tensor:
+    """Apply a token-local ``function`` to ``[..., C]`` in chunks of ``CHUNK_TOKENS`` tokens."""
+    channels = value.shape[-1]
+    flat = value.reshape(-1, channels)
+    if CHUNK_TOKENS <= 0 or flat.shape[0] <= CHUNK_TOKENS:
+        return function(value)
+    parts = [function(part) for part in flat.split(CHUNK_TOKENS, dim=0)]
+    return torch.cat(parts, dim=0).reshape(*value.shape[:-1], parts[0].shape[-1])
 
 
 def vendor_approximate_softmax(value: torch.Tensor) -> torch.Tensor:
@@ -418,27 +446,45 @@ def window_attention(
     pad_top, pad_left = (-window_origin[0], -window_origin[1])
     pad_bottom = (-(value.shape[1] + pad_top)) % window_size
     pad_right = (-(value.shape[2] + pad_left)) % window_size
-    padded_value = functional.pad(
-        value,
-        (0, 0, pad_left, pad_right, pad_top, pad_bottom),
+    padded_value = (
+        value
+        if not (pad_top or pad_left or pad_bottom or pad_right)
+        else functional.pad(value, (0, 0, pad_left, pad_right, pad_top, pad_bottom))
     )
-    windows = partition_windows(padded_value, window_size)
-    attention_windows = cosine_attention(
-        windows,
-        qkv_weight=qkv_weight,
-        attention_scale=attention_scale,
-        attention_bias=attention_bias,
-        projection_weight=projection_weight,
-        head_count=head_count,
-        logit_cap=logit_cap,
-    )
-    attention = reverse_windows(
-        attention_windows,
-        batch_count=value.shape[0],
-        height=padded_value.shape[1],
-        width=padded_value.shape[2],
-        window_size=window_size,
-    )
+    def attend(strip: torch.Tensor) -> torch.Tensor:
+        """Window attention of a strip of whole window rows, back in NHWC."""
+        windows = partition_windows(strip, window_size)
+        attended = cosine_attention(
+            windows,
+            qkv_weight=qkv_weight,
+            attention_scale=attention_scale,
+            attention_bias=attention_bias,
+            projection_weight=projection_weight,
+            head_count=head_count,
+            logit_cap=logit_cap,
+        )
+        return reverse_windows(
+            attended,
+            batch_count=strip.shape[0],
+            height=strip.shape[1],
+            width=strip.shape[2],
+            window_size=window_size,
+        )
+
+    # Strips of whole window rows keep the temporaries (the window copy, the
+    # scores, the attended windows) bounded by CHUNK_TOKENS instead of the frame.
+    padded_height, padded_width = padded_value.shape[1], padded_value.shape[2]
+    window_rows = padded_height // window_size
+    tokens_per_window_row = padded_width * window_size
+    rows_per_strip = max(1, CHUNK_TOKENS // tokens_per_window_row) if CHUNK_TOKENS > 0 else window_rows
+    if window_rows <= rows_per_strip:
+        attention = attend(padded_value)
+    else:
+        attention = torch.empty_like(padded_value)
+        for first in range(0, window_rows, rows_per_strip):
+            y0 = first * window_size
+            y1 = min(first + rows_per_strip, window_rows) * window_size
+            attention[:, y0:y1] = attend(padded_value[:, y0:y1])
     return attention[
         :,
         pad_top : pad_top + value.shape[1],
@@ -462,16 +508,14 @@ def window_block(
     window_size: int,
     window_origin: tuple[int, int] = (0, 0),
 ) -> torch.Tensor:
-    expanded = value @ expansion_weight
-    feed_forward_branch = (
-        e4m3_round_trip(quadratic_gate_activation(expanded))
-        @ feed_forward_projection_weight
-    )
-    feed_forward_output = cosine_residual(
-        value,
-        feed_forward_branch,
-        feed_forward_cosine,
-    )
+    def feed_forward(tokens: torch.Tensor) -> torch.Tensor:
+        branch = (
+            e4m3_round_trip(quadratic_gate_activation(tokens @ expansion_weight))
+            @ feed_forward_projection_weight
+        )
+        return cosine_residual(tokens, branch, feed_forward_cosine)
+
+    feed_forward_output = _per_token(feed_forward, value)
     attention_branch = window_attention(
         feed_forward_output,
         qkv_weight=qkv_weight,
@@ -482,11 +526,32 @@ def window_block(
         window_size=window_size,
         window_origin=window_origin,
     )
-    return cosine_residual(
-        feed_forward_output,
-        attention_branch,
-        attention_cosine,
-    )
+    return _residual_per_token(feed_forward_output, attention_branch, attention_cosine)
+
+
+def _rows(function, *tensors: torch.Tensor) -> torch.Tensor:
+    """Apply a token-local ``function`` of several NHWC tensors in row chunks, into one output."""
+    lead = tensors[0]
+    if CHUNK_TOKENS <= 0 or lead.ndim != 4 or lead.shape[0] * lead.shape[1] * lead.shape[2] <= CHUNK_TOKENS:
+        return function(*tensors)
+    rows = max(1, CHUNK_TOKENS // (lead.shape[0] * lead.shape[2]))
+    out = None
+    for y0 in range(0, lead.shape[1], rows):
+        part = function(*(t[:, y0 : y0 + rows] for t in tensors))
+        if out is None:
+            out = torch.empty((lead.shape[0], lead.shape[1], lead.shape[2], part.shape[-1]), dtype=part.dtype, device=part.device)
+        out[:, y0 : y0 + rows] = part
+    return out
+
+
+def _residual_per_token(value: torch.Tensor, branch: torch.Tensor, cosine: torch.Tensor) -> torch.Tensor:
+    """``cosine_residual`` in row chunks, written into ``branch`` (a fresh attention output the block owns)."""
+    if CHUNK_TOKENS <= 0 or branch.ndim != 4 or branch.shape != value.shape:
+        return cosine_residual(value, branch, cosine)
+    rows = max(1, CHUNK_TOKENS // (branch.shape[0] * branch.shape[2]))
+    for y0 in range(0, branch.shape[1], rows):
+        branch[:, y0 : y0 + rows] = cosine_residual(value[:, y0 : y0 + rows], branch[:, y0 : y0 + rows], cosine)
+    return branch
 
 
 def branched_feed_forward(
@@ -581,21 +646,18 @@ def branched_window_block(
     window_size: int,
     window_origin: tuple[int, int] = (0, 0),
 ) -> torch.Tensor:
-    feed_forward_branch = branched_feed_forward(
-        value,
-        expansion_weight=expansion_weight,
-        branch_projection_weight=branch_projection_weight,
-        output_projection_weight=output_projection_weight,
-    )
     # The fused multi-head kernels publish the FFN residual as E4M3 before the
     # attention reads it (block-5 natural capture: 0.0386 -> 0.0077 MAE).
-    feed_forward_output = e4m3_round_trip(
-        cosine_residual(
-            value,
-            feed_forward_branch,
-            feed_forward_cosine,
+    def feed_forward(tokens: torch.Tensor) -> torch.Tensor:
+        branch = branched_feed_forward(
+            tokens,
+            expansion_weight=expansion_weight,
+            branch_projection_weight=branch_projection_weight,
+            output_projection_weight=output_projection_weight,
         )
-    )
+        return e4m3_round_trip(cosine_residual(tokens, branch, feed_forward_cosine))
+
+    feed_forward_output = _per_token(feed_forward, value)
     attention_branch = window_attention(
         feed_forward_output,
         qkv_weight=qkv_weight,
@@ -606,11 +668,7 @@ def branched_window_block(
         window_size=window_size,
         window_origin=window_origin,
     )
-    return cosine_residual(
-        feed_forward_output,
-        attention_branch,
-        attention_cosine,
-    )
+    return _residual_per_token(feed_forward_output, attention_branch, attention_cosine)
 
 
 def split_window_block(
@@ -630,20 +688,19 @@ def split_window_block(
     window_size: int,
     window_origin: tuple[int, int] = (0, 0),
 ) -> torch.Tensor:
-    feed_forward_branch = (
-        split_group_feed_forward(
-            value,
-            first_projection_weight=first_projection_weight,
-            expand_weight=expand_weight,
-            project_weight=project_weight,
+    def feed_forward(tokens: torch.Tensor) -> torch.Tensor:
+        branch = (
+            split_group_feed_forward(
+                tokens,
+                first_projection_weight=first_projection_weight,
+                expand_weight=expand_weight,
+                project_weight=project_weight,
+            )
+            @ feed_forward_projection_weight
         )
-        @ feed_forward_projection_weight
-    )
-    feed_forward_output = cosine_residual(
-        value,
-        feed_forward_branch,
-        feed_forward_cosine,
-    )
+        return cosine_residual(tokens, branch, feed_forward_cosine)
+
+    feed_forward_output = _per_token(feed_forward, value)
     attention_branch = window_attention(
         feed_forward_output,
         qkv_weight=qkv_weight,
@@ -654,11 +711,7 @@ def split_window_block(
         window_size=window_size,
         window_origin=window_origin,
     )
-    return cosine_residual(
-        feed_forward_output,
-        attention_branch,
-        attention_cosine,
-    )
+    return _residual_per_token(feed_forward_output, attention_branch, attention_cosine)
 
 
 def global_block(
@@ -948,7 +1001,8 @@ class NeuralRenderingModel(nn.Module):
         )
 
     def forward(self, input_value: torch.Tensor) -> torch.Tensor:
-        value = input_value @ self.weight("block0.layer0.input_adapter_weight")
+        adapter = self.weight("block0.layer0.input_adapter_weight")
+        value = _per_token(lambda tokens: tokens @ adapter, input_value)
         # The fused pre kernel runs the block-0 window attention on the full
         # adapter output, then 2x2-average-pools and publishes once (vendor
         # block-0 capture: 0.0254 -> 0.0075 MAE versus pool-then-block).
@@ -958,8 +1012,10 @@ class NeuralRenderingModel(nn.Module):
         # up as pixel-level grain (four DLL goldens at 256: MAE 0.0118 -> 0.0055,
         # high-pass correlation 0.52 -> 0.94, spectral bands within 8%).
         block0_output = self._window(value, 0, head_count=1)
+        del value
         full_resolution_skip = e4m3_round_trip(block0_output)
         value = e4m3_round_trip(average_pool2(block0_output))
+        del block0_output
         for index in range(1, 4):
             value = self._window(value, index, head_count=1)
         skips = [value]
@@ -1023,13 +1079,14 @@ class NeuralRenderingModel(nn.Module):
             height=full_resolution_skip.shape[1],
             width=full_resolution_skip.shape[2],
         )
-        value = value * self.weight(
-            "block70.layer0.inp_merge_sin"
-        ) + full_resolution_skip * self.weight("block70.layer0.inp_merge_cos")
+        merge_sin = self.weight("block70.layer0.inp_merge_sin")
+        merge_cos = self.weight("block70.layer0.inp_merge_cos")
+        value = _rows(lambda up, skip: up * merge_sin + skip * merge_cos, value, full_resolution_skip)
+        del full_resolution_skip
         value = self._window(value, 70, head_count=1)
-        return value[..., :16] @ self.weight("block70.layer0.out_gain") + value[
-            ..., 16:
-        ] @ self.weight("block70.layer0.out_conv_weight")
+        out_gain = self.weight("block70.layer0.out_gain")
+        out_conv = self.weight("block70.layer0.out_conv_weight")
+        return _per_token(lambda tokens: tokens[..., :16] @ out_gain + tokens[..., 16:] @ out_conv, value)
 
 
 def load_model(path: str | os.PathLike[str]) -> NeuralRenderingModel:
