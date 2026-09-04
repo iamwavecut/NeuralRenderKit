@@ -140,6 +140,7 @@ the Metal port. The PyTorch reference graph is unoptimised (about `15 s` per
 
 - [Embedding guide](docs/embedding.md): the Swift API for still frames, Core ML heads and the temporal reference.
 - [Recovery notes](docs/recovery-notes.md): package format, the recovered graph, every measured error, temporal command-line reference, roadmap.
+- [Frame generation](docs/frame-generation.md): the recovered frame generation graph, how it was verified against the vendor's library, whole-clip results and speed.
 - [Research notes](docs/research/): kernel captures and the first-frame preprocessor.
 
 ## Development

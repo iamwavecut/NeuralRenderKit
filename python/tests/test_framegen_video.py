@@ -79,3 +79,24 @@ class InterpolateVideoTests(unittest.TestCase):
             for options in (FrameGenOptions(factor=1), FrameGenOptions(mode="fps", audio="stretch"), FrameGenOptions(mode="other")):
                 with self.assertRaises(VideoToolError):
                     interpolate_video(src, dst, self.generator, options, log=lambda _m: None)
+
+
+@unittest.skipUnless(HAVE_FFMPEG, "ffmpeg/ffprobe not available")
+class MetalBackendTests(unittest.TestCase):
+    def test_nrk_backend_generates_frames_when_the_binary_exists(self):
+        from neuralrenderkit.nrk_stream import find_nrk
+
+        try:
+            find_nrk(None)
+        except RuntimeError as error:
+            raise unittest.SkipTest(str(error))
+        from safetensors.torch import save_file
+
+        with tempfile.TemporaryDirectory() as directory:
+            weights = pathlib.Path(directory) / "fg.safetensors"
+            save_file(synthetic_framegen_weights(), str(weights), metadata={"format": "dlssg-framegen-dense-v1"})
+            src = pathlib.Path(directory) / "src.mp4"; dst = pathlib.Path(directory) / "dst.mp4"
+            _synthetic_video(src, frames=4, fps=10, audio=False)
+            result = interpolate_video(src, dst, None, FrameGenOptions(backend="nrk", nrk_weights=str(weights), factor=3), log=lambda _m: None)
+            self.assertEqual(result.output_frames, 4 + 3 * 2)
+            self.assertEqual(probe(dst).frame_count, 10)

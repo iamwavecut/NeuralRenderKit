@@ -139,3 +139,60 @@ class NRKStreamSession:
         if self.process.returncode:
             raise RuntimeError(f"nrk stream exited with {self.process.returncode}: {stderr[-500:]}")
         return summary
+
+
+class NRKFrameGenStream:
+    """Frame generation through ``nrk framegen-stream`` (Metal): push frames in order, get the
+    ``factor - 1`` generated frames between the previous frame and the new one back as uint8."""
+
+    def __init__(self, weights: str | Path, width: int, height: int, *, factor: int = 2, precision: str = "float16", nrk: str | None = None):
+        self.width, self.height, self.factor = width, height, factor
+        command = [find_nrk(nrk), "framegen-stream", "--weights", str(weights), "--width", str(width), "--height", str(height),
+                   "--factor", str(factor), "--precision", precision]
+        self.process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self.frames = 0
+
+    def push(self, frame: np.ndarray) -> list[np.ndarray]:
+        """Send one uint8 (H, W, 3) frame; returns the generated frames after the first push."""
+        frame = np.asarray(frame)
+        if frame.shape != (self.height, self.width, 3):
+            raise ValueError(f"frame must be ({self.height}, {self.width}, 3)")
+        payload = np.ascontiguousarray(frame.astype(np.float32) / 255.0 if frame.dtype == np.uint8 else frame.astype("<f4")).tobytes()
+        try:
+            self.process.stdin.write(payload); self.process.stdin.flush()
+        except BrokenPipeError as error:
+            raise RuntimeError(f"nrk framegen-stream failed: {self.process.stderr.read().decode(errors='replace')[-500:]}") from error
+        self.frames += 1
+        if self.frames == 1:
+            return []
+        expected = self.height * self.width * 3 * 4
+        outputs = []
+        for _ in range(self.factor - 1):
+            data = bytearray()
+            while len(data) < expected:
+                chunk = self.process.stdout.read(expected - len(data))
+                if not chunk:
+                    raise RuntimeError(f"nrk framegen-stream ended early: {self.process.stderr.read().decode(errors='replace')[-500:]}")
+                data += chunk
+            values = np.frombuffer(bytes(data), dtype="<f4").reshape(self.height, self.width, 3)
+            outputs.append((np.clip(values, 0, 1) * 255.0 + 0.5).astype(np.uint8))
+        return outputs
+
+    def close(self) -> dict:
+        if self.process.stdin:
+            try:
+                self.process.stdin.close()
+            except BrokenPipeError:
+                pass
+        stderr = self.process.stderr.read().decode(errors="replace")
+        self.process.wait()
+        for pipe in (self.process.stdout, self.process.stderr):
+            if pipe is not None:
+                pipe.close()
+        for line in stderr.strip().split("\n"):
+            if line.startswith("{"):
+                try:
+                    return json.loads(line)
+                except json.JSONDecodeError:
+                    pass
+        return {}

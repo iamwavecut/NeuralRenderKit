@@ -48,7 +48,7 @@ enum CLIOutput {
 func runCommand(_ arguments: [String]) async throws {
     guard let command = arguments.first else {
         throw CLIError.usage(
-            "expected inspect, run, run-sequence, render-image, or stream"
+            "expected inspect, run, run-sequence, render-image, framegen, framegen-stream, or stream"
         )
     }
     let commandArguments = Array(arguments.dropFirst())
@@ -63,6 +63,10 @@ func runCommand(_ arguments: [String]) async throws {
         try await RunSequenceCommand.run(arguments: commandArguments)
     case "stream":
         try await StreamCommand.run(arguments: commandArguments)
+    case "framegen":
+        try await FrameGenCommand.run(arguments: commandArguments)
+    case "framegen-stream":
+        try await FrameGenStreamCommand.run(arguments: commandArguments)
     default:
         throw CLIError.usage("unknown command '\(command)'")
     }

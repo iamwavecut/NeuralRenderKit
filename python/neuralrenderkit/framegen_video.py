@@ -52,6 +52,10 @@ class FrameGenOptions:
     decode_args: list[str] = field(default_factory=list)
     overwrite: bool = False
     status_interval: float = 60.0
+    backend: str = "torch"            # torch | nrk (Metal, macOS: frames stream through `nrk framegen-stream`)
+    nrk: str | None = None
+    nrk_weights: str | None = None    # dense safetensors for the Swift runtime (defaults to the torch weights path)
+    nrk_precision: str = "float16"
 
 
 @dataclass
@@ -69,7 +73,7 @@ class FrameGenResult:
 def interpolate_video(
     source: str | Path,
     destination: str | Path,
-    generator: FrameGenerator,
+    generator: FrameGenerator | None,
     options: FrameGenOptions | None = None,
     *,
     ffmpeg: str | None = None,
@@ -86,6 +90,12 @@ def interpolate_video(
         raise VideoToolError("factor must be at least 2")
     if options.audio not in AUDIO_MODES:
         raise VideoToolError(f"audio must be one of {AUDIO_MODES}")
+    if options.backend not in ("torch", "nrk"):
+        raise VideoToolError("backend must be 'torch' or 'nrk'")
+    if options.backend == "torch" and generator is None:
+        raise VideoToolError("the torch backend needs a FrameGenerator")
+    if options.backend == "nrk" and not options.nrk_weights:
+        raise VideoToolError("the nrk backend needs nrk_weights (dense frame generation safetensors)")
     if options.audio == "stretch" and options.mode != "slowmo":
         raise VideoToolError("audio 'stretch' only applies to slowmo (fps mode keeps the duration; use 'copy')")
     if destination.exists() and not options.overwrite:
@@ -120,6 +130,11 @@ def interpolate_video(
     expected = info.frame_count
     if expected is not None and options.frame_limit is not None:
         expected = min(expected, options.frame_limit)
+    stream = None
+    if options.backend == "nrk":
+        from .nrk_stream import NRKFrameGenStream
+
+        stream = NRKFrameGenStream(options.nrk_weights, info.width, info.height, factor=options.factor, precision=options.nrk_precision, nrk=options.nrk)
     decoder = subprocess.Popen(decode, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     encoder = subprocess.Popen(encode, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
     started = time.perf_counter(); last_status = started
@@ -138,7 +153,10 @@ def interpolate_video(
                 break
             frame = np.frombuffer(chunk, dtype=np.uint8).reshape(info.height, info.width, 3)
             frames_in += 1
-            if previous is not None:
+            if stream is not None:
+                for generated in stream.push(frame):
+                    write(generated)
+            elif previous is not None:
                 for generated in generator.generate(previous, frame, options.factor):
                     write(generated)
             write(frame)
@@ -149,6 +167,8 @@ def interpolate_video(
                 eta = f" eta {int((expected - frames_in) / rate)} s" if expected and rate else ""
                 log(f"STATUS {time.strftime('%H:%M:%S')} frames {frames_in}/{expected if expected is not None else '?'} {rate:.2f} fps{eta}")
                 last_status = now
+        if stream is not None:
+            stream.close()
         encoder.stdin.close()
         decoder_error = decoder.stderr.read().decode(errors="replace").strip()
         encoder_error = encoder.stderr.read().decode(errors="replace").strip()

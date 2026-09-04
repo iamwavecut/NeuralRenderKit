@@ -48,6 +48,9 @@ def build_parser() -> argparse.ArgumentParser:
     fg.add_argument("--factor", type=int, default=2, help="2 doubles (one generated frame per pair), 3 or 4 generate several phases")
     fg.add_argument("--audio", default="copy", choices=AUDIO_MODES, help="copy the audio, stretch it to the slowed video (atempo, pitch kept) or drop it")
     fg.add_argument("--device", default="auto"); fg.add_argument("--precision", default="reference", choices=("reference", "fast"))
+    fg.add_argument("--backend", default="torch", choices=("torch", "nrk"), help="'nrk' streams frames through the Swift Metal runtime (macOS)")
+    fg.add_argument("--nrk", default=None, help="path to the nrk binary (default: PATH or the repository build)")
+    fg.add_argument("--nrk-precision", default="float16", choices=("float16", "float32"))
     fg.add_argument("--frames", type=int, default=None, help="stop after this many input frames")
     fg.add_argument("--decode-args", default="", help="extra FFmpeg input options, quoted")
     fg.add_argument("--encode-args", default=None, help=f"FFmpeg output options replacing the default: {' '.join(DEFAULT_ENCODE_ARGS)}")
@@ -76,15 +79,17 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "framegen":
             from .framegen import FrameGenerator
 
-            generator = FrameGenerator.from_safetensors(args.weights, device=args.device, precision=args.precision)
+            generator = None if args.backend == "nrk" else FrameGenerator.from_safetensors(args.weights, device=args.device, precision=args.precision)
             options = FrameGenOptions(
                 mode=args.mode, factor=args.factor, audio=args.audio, frame_limit=args.frames,
                 decode_args=shlex.split(args.decode_args), encode_args=None if args.encode_args is None else shlex.split(args.encode_args),
                 overwrite=args.overwrite, status_interval=args.status_interval,
+                backend=args.backend, nrk=args.nrk, nrk_weights=str(args.weights), nrk_precision=args.nrk_precision,
             )
             result = interpolate_video(args.input, args.output, generator, options, ffmpeg=args.ffmpeg, ffprobe=args.ffprobe)
+            where = "nrk metal" if generator is None else str(generator.device)
             print(f"wrote {result.output} ({result.input_frames} -> {result.output_frames} frames, {result.width}x{result.height}, "
-                  f"{result.input_fps:.3f} -> {result.output_fps:.3f} fps, {result.output_frames / result.seconds if result.seconds else 0:.2f} fps on {generator.device})")
+                  f"{result.input_fps:.3f} -> {result.output_fps:.3f} fps, {result.output_frames / result.seconds if result.seconds else 0:.2f} fps on {where})")
             return 0
         pipeline = None
         if args.backend == "torch":
