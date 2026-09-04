@@ -125,8 +125,14 @@ def convert(
     ffmpeg: str | None = None,
     ffprobe: str | None = None,
     log: Callable[[str], None] | None = None,
+    progress: Callable[[int, int | None], None] | None = None,
+    should_stop: Callable[[], bool] | None = None,
 ) -> ConvertResult:
-    """Decode ``source`` with FFmpeg, enhance every frame, encode to ``destination``."""
+    """Decode ``source`` with FFmpeg, enhance every frame, encode to ``destination``.
+
+    ``progress(frames_done, frames_expected)`` is called after every encoded frame;
+    ``should_stop()`` is polled once per decoded frame and ends the conversion early
+    (the output is finalised with the frames written so far)."""
     options = options or ConvertOptions()
     log = log or (lambda message: print(message, file=sys.stderr, flush=True))
     source = Path(source); destination = Path(destination)
@@ -199,6 +205,8 @@ def convert(
         image = np.clip(stream.process_frame(frame) if stream is not None else session.process(frame), 0, 1) * scale + 0.5
         encoder.stdin.write(np.ascontiguousarray(image.astype(dtype)).tobytes())
         frames += 1
+        if progress is not None:
+            progress(frames, expected)
 
     def emit(prepared_batch):
         nonlocal frames
@@ -210,9 +218,13 @@ def convert(
             image = np.clip(result.image, 0, 1) * scale + 0.5
             encoder.stdin.write(np.ascontiguousarray(image.astype(dtype)).tobytes())
             frames += 1
+            if progress is not None:
+                progress(frames, expected)
     try:
         pending = []
         while True:
+            if should_stop is not None and should_stop():
+                break
             chunk = decoder.stdout.read(frame_bytes)
             if len(chunk) < frame_bytes:
                 break
@@ -241,6 +253,9 @@ def convert(
         for process in (decoder, encoder):
             if process.poll() is None:
                 process.kill()
+            for pipe in (process.stdin, process.stdout, process.stderr):
+                if pipe is not None:
+                    pipe.close()
     if decoder.returncode:
         raise VideoToolError(f"ffmpeg decode failed: {decoder_error}")
     if encoder.returncode:

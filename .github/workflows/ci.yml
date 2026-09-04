@@ -90,7 +90,7 @@ jobs:
           if [[ "${{ runner.os }}" != "Windows" ]]; then
             python -m pip install 'coremltools==9.0'
           fi
-          python -m pip install ./python
+          python -m pip install './python[web]'
 
       - name: Package unit tests
         shell: bash

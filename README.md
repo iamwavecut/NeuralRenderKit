@@ -121,6 +121,23 @@ motion). The Python temporal path matches the Swift reference
 real weights. There is no player of our own: playback and A/B checks go
 through mpv.
 
+## Web front end
+
+`nrk-web` is a local page for the same pipelines: drop a picture or a clip,
+switch on neural rendering and/or frame generation, run, and compare the result
+with a wipe slider (images) or a side-by-side preview (video). Jobs run one at
+a time on the GPU with per-frame progress and cancellation; results land in
+`~/NeuralRenderKit/outputs/<job>/`. Effects can be chained in either order
+(neural rendering then frame generation, or the reverse); the Settings page
+takes the weight files produced by `nrk-weights` and picks the backend
+(PyTorch everywhere, Metal through `nrk` on macOS). The same operations are
+available as an HTTP API (`/api/effects`, `/api/jobs`, …) for scripts.
+
+```sh
+pip install './python[web]'          # NiceGUI + pydantic; ffmpeg must be in PATH for video
+nrk-web                              # opens http://127.0.0.1:8181 (--native for a window, --no-browser, --port, --root)
+```
+
 ## Python API
 
 ```python
@@ -163,6 +180,7 @@ package tests alone.
 | Temporal reference (`nrk run-sequence`, Python `TemporalSession`) | Working; Swift and Python agree within `0.0014` MAE; end-to-end parity with NVIDIA's temporal path open |
 | Video conversion (`nrk-video`, FFmpeg decode/encode, audio copy) | Working; single-frame and temporal modes (optical-flow or engine motion, learned history blend) |
 | Frame generation (`nrk framegen`, `nrk-video framegen`, Python `FrameGenerator`) | Working on Metal (Swift/MLX) and in PyTorch (CPU/CUDA/MPS); reproduces NVIDIA's library output at `59.9` dB PSNR on captured frames and to `0.01–0.03` dB on five whole clips; `5–8` ms per 960×540 frame on an M2 Max; see [Research](#research-frame-generation-and-super-resolution) |
+| Web front end (`nrk-web`, NiceGUI) | Working: images and video, effect chains, job queue with progress and cancellation, HTTP API |
 | Super resolution | Measured and rejected: it needs engine motion vectors and matching jitter, and loses to Lanczos on realistic content |
 
 ## Research: frame generation and super resolution

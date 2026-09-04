@@ -79,8 +79,13 @@ def interpolate_video(
     ffmpeg: str | None = None,
     ffprobe: str | None = None,
     log: Callable[[str], None] | None = None,
+    progress: Callable[[int, int | None], None] | None = None,
+    should_stop: Callable[[], bool] | None = None,
 ) -> FrameGenResult:
-    """Decode ``source``, generate ``factor - 1`` frames between every consecutive pair, encode."""
+    """Decode ``source``, generate ``factor - 1`` frames between every consecutive pair, encode.
+
+    ``progress(input_frames_done, input_frames_expected)`` is called per input frame;
+    ``should_stop()`` is polled per input frame and ends the job early."""
     options = options or FrameGenOptions()
     log = log or (lambda message: print(message, file=sys.stderr, flush=True))
     source = Path(source); destination = Path(destination)
@@ -148,11 +153,15 @@ def interpolate_video(
     try:
         previous: np.ndarray | None = None
         while True:
+            if should_stop is not None and should_stop():
+                break
             chunk = decoder.stdout.read(frame_bytes)
             if len(chunk) < frame_bytes:
                 break
             frame = np.frombuffer(chunk, dtype=np.uint8).reshape(info.height, info.width, 3)
             frames_in += 1
+            if progress is not None:
+                progress(frames_in, expected)
             if stream is not None:
                 for generated in stream.push(frame):
                     write(generated)
