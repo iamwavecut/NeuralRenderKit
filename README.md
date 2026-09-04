@@ -67,7 +67,7 @@ Frame generation:
 ```sh
 .build/release/nrk framegen a.png b.png --weights weights/framegen.safetensors --output between.png   # --factor 3|4 writes between-1.png …; --phase 0.25
 nrk-video framegen in.mp4 out.mp4 --weights weights/framegen.safetensors                       # frame rate x2, audio copied
-nrk-video framegen in.mp4 out.mp4 --weights weights/framegen.safetensors --backend nrk         # Metal through nrk framegen-stream
+nrk-video framegen in.mp4 out.mp4 --weights weights/framegen.safetensors --backend nrk         # Metal through nrk framegen-stream; --batch 4 pairs per pass
 nrk-video framegen in.mp4 slow.mp4 --weights weights/framegen.safetensors --mode slowmo --factor 4 --audio stretch
 ```
 

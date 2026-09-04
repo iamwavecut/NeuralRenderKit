@@ -62,28 +62,38 @@ the withheld frames, the vendor's library against this port (PyTorch, M2 Max):
 
 ## Speed
 
-Per generated frame on an M2 Max, after warm-up:
+Per generated frame on an M2 Max at steady state (kernel compilation and the
+first batch excluded), float16 unless noted:
 
 | | 960×540 | 1920×1080 |
 | --- | --- | --- |
-| Metal (Swift/MLX, float16) | 6.5 ms | 19.5 ms |
+| Metal, `nrk framegen`, one frame (N = 1) | 4.6 ms | 27 ms |
+| Metal, `nrk framegen --factor 4` (the three phases as one batch, N = 3) | 5.0 ms | 23 ms |
+| Metal, `nrk framegen-stream --batch 4` through the uint8 pipe (what `nrk-video framegen --backend nrk` uses) | 6.2 ms | 26 ms |
+| Metal, `nrk framegen-stream --batch 1`, float32 pipe (the previous protocol) | 27 ms | 43 ms |
 | Metal (float32, MLX convolutions) | 9.2 ms | 32 ms |
 | PyTorch / MPS (float16) | 5.3 ms | 17 ms |
 | PyTorch / MPS (float32) | 6.3 ms | 22 ms |
 
-The Swift port (`nrk framegen`, `nrk framegen-stream`) runs each convolution
-as one Metal kernel with the bias, the clamped LeakyReLU, the residual add and
-the 2×2 mean pool in its epilogue (the three heads as one convolution, the
-linear head as a block-diagonal one), assembles each block's input with a
-single kernel (box means, blurred error, upsampled flows, warps) and composes
-the output with another. Going from the eager MLX graph to this took 540p from
-17.8 ms to 6.5 ms. What remains is not arithmetic: at these sizes (240×136 and
-below, 16–64 channels) every layer costs 150–250 µs whether it is MLX's
-convolution, a per-pixel kernel or a `simdgroup_matrix` kernel, so the floor is
-the latency of a chain of some thirty small GPU dispatches; PyTorch/MPS sits at
-the same floor a little lower. The next step would be a kernel that runs several
-layers per launch. Accuracy is unaffected: the two ports agree within `1e-7`
-MAE at float32 and `1.3e-5` at float16 on real weights (a full 960×540 frame).
+Every stage of the Swift port takes a batch (`[N, H, W, 3]` frames, one phase
+per sample): the phases of one pair (`--factor 3|4`) and the consecutive pairs
+of a video (`--batch`, default 4) run as one pass. Batching does not lower the
+GPU time per frame much (the layers are throughput-bound already at N = 1;
+1080p ×4 gains 16 %), but it lets the frame server overlap the host work with
+the GPU: with `--batch 1` the server waits for the host after every frame.
+The pipe carries uint8 RGB in both directions (`--format u8`, the default;
+`f32` keeps the float protocol), which took the host side of the stream from
+22 ms to under 2 ms per 540p frame; the frames are converted on the GPU.
+
+Each convolution runs as one Metal kernel with the bias, the clamped
+LeakyReLU, the residual add and the 2×2 mean pool in its epilogue (the three
+heads as one convolution, the linear head as a block-diagonal one); each
+block's input is assembled by a single kernel (box means, blurred error,
+upsampled flows, warps) and the output composed by another. The PyTorch port
+batches the same way (`FrameGenerator.generate` and `generate_pairs`).
+Accuracy: the two ports agree within `1e-7` MAE at float32 and `1.3e-5` at
+float16 on real weights (a full 960×540 frame); a batched result equals the
+one-frame result exactly at float32 and within float16 rounding on MPS.
 
 ## Not ported
 

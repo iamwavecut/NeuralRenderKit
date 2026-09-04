@@ -118,13 +118,15 @@ enum FrameGenCommand {
         previous = ms
       }
     }
-    for (k, value) in phases.enumerated() {
-      if repeatCount > 1 { _ = try generator.interpolate(aArray, bArray, phase: value) }  // warm-up: kernel compilation
-      let started = clock.now
-      var frame = try generator.interpolate(aArray, bArray, phase: value)
-      for _ in 1..<repeatCount { frame = try generator.interpolate(aArray, bArray, phase: value) }
-      let elapsed = started.duration(to: clock.now)
-      seconds += (Double(elapsed.components.seconds) + Double(elapsed.components.attoseconds) / 1e18) / Double(repeatCount)
+    // all phases of the pair in one batch (N = phases.count samples)
+    if repeatCount > 1 { _ = try generator.interpolate(aArray, bArray, phases: phases) }  // warm-up: kernel compilation
+    let started = clock.now
+    var frames = try generator.interpolate(aArray, bArray, phases: phases)
+    for _ in 1..<repeatCount { frames = try generator.interpolate(aArray, bArray, phases: phases) }
+    let elapsed = started.duration(to: clock.now)
+    seconds = (Double(elapsed.components.seconds) + Double(elapsed.components.attoseconds) / 1e18) / Double(repeatCount)
+    for k in 0..<phases.count {
+      let frame = frames[k..<(k + 1)]
       let url: URL
       if phases.count == 1 {
         url = output

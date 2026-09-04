@@ -15,9 +15,9 @@ enum FrameGenerationFusedConv {
     inputNames: ["input", "weight", "bias", "residual", "params"],
     outputNames: ["out"],
     source: #"""
-      // params = [height, width, cin, cout, flags, outHeight, outWidth]
+      // params = [height, width, cin, cout, flags, outHeight, outWidth, batch]
       //   flags bit 0: activation (leaky 0.01, clamp ±6), bit 1: add residual, bit 2: 2x2 mean pool.
-      // One thread per (output pixel, group of 8 output channels).
+      // One thread per (sample, output pixel, group of 8 output channels).
       // weight layout: [tap 9][cin/4][cout] half4  (4 input channels per half4).
       const uint index = thread_position_in_grid.x;
       const int height = int(params[0]);
@@ -27,17 +27,21 @@ enum FrameGenerationFusedConv {
       const uint flags = params[4];
       const int outHeight = int(params[5]);
       const int outWidth = int(params[6]);
+      const uint batch = params[7];
       const int groups = cout / 8;
-      const uint total = uint(outHeight * outWidth * groups);
+      const uint total = uint(outHeight * outWidth * groups) * batch;
       if (index >= total) { return; }
       const int group = int(index % uint(groups));
-      const int pixel = int(index / uint(groups));
-      const int oy = pixel / outWidth;
-      const int ox = pixel % outWidth;
+      const int pixel = int(index / uint(groups));            // global over the batch
+      const int n = pixel / (outHeight * outWidth);
+      const int local = pixel % (outHeight * outWidth);
+      const int oy = local / outWidth;
+      const int ox = local % outWidth;
       const bool pool = (flags & 4u) != 0u;
       const int span = pool ? 2 : 1;
       const int cin4 = cin / 4;
-      const device half4* input4 = (const device half4*)input;
+      const device half4* input4 = (const device half4*)input + n * height * width * cin4;
+      const device half* res = residual + n * height * width * cout;
       const device half4* weight4 = (const device half4*)weight;
       float acc[8];
       for (int c = 0; c < 8; ++c) { acc[c] = 0.0f; }
@@ -64,7 +68,7 @@ enum FrameGenerationFusedConv {
           for (int c = 0; c < 8; ++c) {
             float value = part[c] + float(bias[group * 8 + c]);
             if (flags & 1u) { value = clamp(value < 0.0f ? value * 0.01f : value, -6.0f, 6.0f); }
-            if (flags & 2u) { value += float(residual[((y * width + x) * cout) + group * 8 + c]); }
+            if (flags & 2u) { value += float(res[((y * width + x) * cout) + group * 8 + c]); }
             acc[c] += value;
           }
         }
@@ -86,29 +90,33 @@ enum FrameGenerationFusedConv {
     inputNames: ["input", "weight", "bias", "residual", "params"],
     outputNames: ["out"],
     source: #"""
-      // params = [height, width, cin, cout, flags]; weight layout [tap*cin + ci][cout] halves.
+      // params = [height, width, cin, cout, flags, batch]; weight layout [tap*cin + ci][cout] halves.
       const int height = int(params[0]);
       const int width = int(params[1]);
       const int cin = int(params[2]);
       const int cout = int(params[3]);
       const uint flags = params[4];
+      const int batch = int(params[5]);
       const int paddedWidth = width + 2;
       const uint simdgroupsPerTile = uint(cout / 16);
-      const uint tile = threadgroup_position_in_grid.x;
       const uint sg = simdgroup_index_in_threadgroup;
       const uint lane = thread_index_in_simdgroup;
       const int tilesPerRow = (width + 15) / 16;
-      const int ty = int(tile) / tilesPerRow;
-      const int x0 = (int(tile) % tilesPerRow) * 16;
-      if (ty >= height || sg >= simdgroupsPerTile) { return; }
+      const int tilesPerSample = tilesPerRow * height;
+      const int n = int(threadgroup_position_in_grid.x) / tilesPerSample;
+      const int tile = int(threadgroup_position_in_grid.x) % tilesPerSample;
+      const int ty = tile / tilesPerRow;
+      const int x0 = (tile % tilesPerRow) * 16;
+      if (n >= batch || sg >= simdgroupsPerTile) { return; }
       const int n0 = int(sg) * 16;
       threadgroup float scratch[6 * 16 * 16];
       simdgroup_float8x8 acc[2][2];
       for (int i = 0; i < 2; ++i) for (int j = 0; j < 2; ++j) acc[i][j] = simdgroup_float8x8(0.0f);
       simdgroup_half8x8 a[2];
       simdgroup_half8x8 b[2];
-      const device half* in = (const device half*)input;
+      const device half* in = (const device half*)input + n * (height + 3) * paddedWidth * cin;
       const device half* w = (const device half*)weight;
+      const uint sampleOffset = uint(n * height * width * cout);
       for (int tap = 0; tap < 9; ++tap) {
         const int dy = tap / 3, dx = tap % 3;
         const device half* rowBase = in + ((ty + dy) * paddedWidth + (x0 + dx)) * cin;
@@ -136,7 +144,7 @@ enum FrameGenerationFusedConv {
         if (x >= width) { continue; }
         float value = mine[e] + float(bias[n0 + n]);
         if (flags & 1u) { value = clamp(value < 0.0f ? value * 0.01f : value, -6.0f, 6.0f); }
-        const uint at = uint((ty * width + x) * cout + n0 + n);
+        const uint at = sampleOffset + uint((ty * width + x) * cout + n0 + n);
         if (flags & 2u) { value += float(residual[at]); }
         out[at] = value;
       }
@@ -192,44 +200,44 @@ enum FrameGenerationFusedConv {
 
   /// The simdgroup-matrix convolution (no pooling; `cout % 16 == 0`, `cin % 8 == 0`).
   static func applySimd(_ x: MLXArray, _ layer: Layer, activation: Bool, residual: MLXArray? = nil) -> MLXArray {
-    let (h, w) = (x.dim(1), x.dim(2))
+    let (n, h, w) = (x.dim(0), x.dim(1), x.dim(2))
     precondition(x.dim(3) == layer.cin && layer.simdgroupCapable)
     let paddedInput = padded(x.asType(.float16), widths: [[0, 0], [1, 2], [1, 1], [0, 0]])
     var flags: UInt32 = activation ? 1 : 0
     if residual != nil { flags |= 2 }
-    let params = MLXArray([UInt32(h), UInt32(w), UInt32(layer.cin), UInt32(layer.cout), flags])
-    let tiles = ((w + 15) / 16) * h
+    let params = MLXArray([UInt32(h), UInt32(w), UInt32(layer.cin), UInt32(layer.cout), flags, UInt32(n)])
+    let tiles = ((w + 15) / 16) * h * n
     let group = 32 * (layer.cout / 16)
     let res = residual ?? layer.bias
     return simdKernel(
       [contiguous(paddedInput), layer.rows, layer.bias, contiguous(res.asType(.float16)), params],
       grid: (tiles * group, 1, 1),
       threadGroup: (group, 1, 1),
-      outputShapes: [[1, h, w, layer.cout]],
+      outputShapes: [[n, h, w, layer.cout]],
       outputDTypes: [.float16]
     )[0]
   }
 
-  /// `x` [1,H,W,cin] fp16 (cin == layer.cin) -> [1,H,W,cout] or [1,H/2,W/2,cout] with `pool`.
+  /// `x` [N,H,W,cin] fp16 (cin == layer.cin) -> [N,H,W,cout] or [N,H/2,W/2,cout] with `pool`.
   static func apply(_ x: MLXArray, _ layer: Layer, activation: Bool, residual: MLXArray? = nil, pool: Bool = false) -> MLXArray {
     if simdEnabled, layer.simdgroupCapable {
       let y = applySimd(x, layer, activation: activation, residual: residual)
       return pool ? FrameGenerator.meanPool2(y) : y
     }
-    let (h, w) = (x.dim(1), x.dim(2))
+    let (n, h, w) = (x.dim(0), x.dim(1), x.dim(2))
     precondition(x.dim(3) == layer.cin, "fused conv expects \(layer.cin) input channels, got \(x.dim(3))")
     let outH = pool ? h / 2 : h, outW = pool ? w / 2 : w
     var flags: UInt32 = activation ? 1 : 0
     if residual != nil { flags |= 2 }
     if pool { flags |= 4 }
-    let params = MLXArray([UInt32(h), UInt32(w), UInt32(layer.cin), UInt32(layer.cout), flags, UInt32(outH), UInt32(outW)])
-    let count = outH * outW * (layer.cout / 8)
+    let params = MLXArray([UInt32(h), UInt32(w), UInt32(layer.cin), UInt32(layer.cout), flags, UInt32(outH), UInt32(outW), UInt32(n)])
+    let count = n * outH * outW * (layer.cout / 8)
     let res = residual ?? layer.bias   // any array when unused; never read
     return kernel(
       [contiguous(x.asType(.float16)), layer.packed, layer.bias, contiguous(res.asType(.float16)), params],
       grid: (count, 1, 1),
       threadGroup: (min(count, 256), 1, 1),
-      outputShapes: [[1, outH, outW, layer.cout]],
+      outputShapes: [[n, outH, outW, layer.cout]],
       outputDTypes: [.float16]
     )[0]
   }

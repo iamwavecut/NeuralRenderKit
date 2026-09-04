@@ -55,16 +55,16 @@ def _up2(x: torch.Tensor) -> torch.Tensor:
 
 
 def _warp(img: torch.Tensor, fx: torch.Tensor, fy: torch.Tensor) -> torch.Tensor:
-    """Backward bilinear warp of img [1,C,H,W] by absolute pixel offsets fx, fy [H,W] (border clamped)."""
-    _, _, h, w = img.shape
+    """Backward bilinear warp of img [N,C,H,W] by absolute pixel offsets fx, fy [N,H,W] (border clamped)."""
+    n, _, h, w = img.shape
     ys, xs = torch.meshgrid(
         torch.arange(h, device=img.device, dtype=img.dtype),
         torch.arange(w, device=img.device, dtype=img.dtype),
         indexing="ij",
     )
-    gx = (xs + fx) * (2.0 / max(w - 1, 1)) - 1.0
-    gy = (ys + fy) * (2.0 / max(h - 1, 1)) - 1.0
-    grid = torch.stack([gx, gy], -1)[None]
+    gx = (xs[None] + fx) * (2.0 / max(w - 1, 1)) - 1.0
+    gy = (ys[None] + fy) * (2.0 / max(h - 1, 1)) - 1.0
+    grid = torch.stack([gx, gy], -1)
     return F.grid_sample(img, grid, mode="bilinear", padding_mode="border", align_corners=True)
 
 
@@ -161,26 +161,29 @@ class FrameGenerator:
 
     # -- stages ---------------------------------------------------------------
     @torch.no_grad()
-    def synthesize(self, a_full: torch.Tensor, b_full: torch.Tensor, t: float) -> torch.Tensor:
-        """Half-resolution export [1, 8, h, w]: flowA.xy, flowB.xy, mask logit, residual.rgb."""
+    def synthesize(self, a_full: torch.Tensor, b_full: torch.Tensor, t: float | torch.Tensor) -> torch.Tensor:
+        """Half-resolution export [N, 8, h, w]: flowA.xy, flowB.xy, mask logit, residual.rgb.
+
+        ``t`` is one phase for the whole batch or a tensor of N phases."""
         a = box2(a_full)
         b = box2(b_full)
         err = photometric_error(a, b)
         zero = torch.zeros_like(err)
-        phase = torch.full_like(err, float(t))
+        phases = torch.as_tensor(t, device=a.device, dtype=a.dtype).reshape(-1, 1, 1, 1)
+        phase = torch.zeros_like(err) + phases
         cand_a = torch.cat([a, err], 1)
         cand_b = torch.cat([b, err], 1)
         f0, m0, r0 = self.block0(torch.cat([cand_a, cand_b, zero, phase], 1))
         f0, m0, r0 = _up2(f0), _up2(m0), _up2(r0)
-        warped_a = _warp(cand_a, 2 * f0[0, 0], 2 * f0[0, 1])
-        warped_b = _warp(cand_b, 2 * f0[0, 2], 2 * f0[0, 3])
+        warped_a = _warp(cand_a, 2 * f0[:, 0], 2 * f0[:, 1])
+        warped_b = _warp(cand_b, 2 * f0[:, 2], 2 * f0[:, 3])
         f1, m1, r1 = self.block1(torch.cat([warped_a, warped_b, f0, m0, zero, r0, phase], 1))
         return torch.cat([2 * f0 + f1, m0 + m1, r0 + r1], 1)
 
     @torch.no_grad()
     def compose(self, a_full: torch.Tensor, b_full: torch.Tensor, export: torch.Tensor) -> torch.Tensor:
-        """Full-resolution frame from the half-res export (main_kernel 083)."""
-        _, _, h, w = a_full.shape
+        """Full-resolution frames [N,3,H,W] from the half-res export (main_kernel 083)."""
+        n, _, h, w = a_full.shape
         _, _, hc, wc = export.shape
         dev, dt = a_full.device, a_full.dtype
         ys, xs = torch.meshgrid(torch.arange(h, device=dev, dtype=dt), torch.arange(w, device=dev, dtype=dt), indexing="ij")
@@ -190,11 +193,12 @@ class FrameGenerator:
         v = (ys / 2).clamp(max=hc - 1.0)
         gx = u * (2.0 / max(wc - 1, 1)) - 1.0
         gy = v * (2.0 / max(hc - 1, 1)) - 1.0
-        up = F.grid_sample(coarse, torch.stack([gx, gy], -1)[None], mode="bilinear", padding_mode="border", align_corners=True)[0]
-        m = up[4]
-        wa = _warp(a_full, 2 * up[0], 2 * up[1])[0]
-        wb = _warp(b_full, 2 * up[2], 2 * up[3])[0]
-        return (m * wa + (1 - m) * wb).clamp(0, 1)[None]
+        grid = torch.stack([gx, gy], -1)[None].expand(n, -1, -1, -1)
+        up = F.grid_sample(coarse, grid, mode="bilinear", padding_mode="border", align_corners=True)
+        m = up[:, 4:5]
+        wa = _warp(a_full, 2 * up[:, 0], 2 * up[:, 1])
+        wb = _warp(b_full, 2 * up[:, 2], 2 * up[:, 3])
+        return (m * wa + (1 - m) * wb).clamp(0, 1)
 
     # -- public API -----------------------------------------------------------
     def _to_tensor(self, frame: np.ndarray | torch.Tensor) -> torch.Tensor:
@@ -222,13 +226,34 @@ class FrameGenerator:
 
     @torch.no_grad()
     def generate(self, a: np.ndarray | torch.Tensor, b: np.ndarray | torch.Tensor, factor: int = 2) -> list[np.ndarray]:
-        """``factor - 1`` intermediate frames between a and b as uint8 HxWx3 arrays (phases k/factor)."""
+        """``factor - 1`` intermediate frames between a and b as uint8 HxWx3 arrays (phases k/factor),
+        computed as one batch."""
         if factor < 2:
             raise ValueError("factor must be >= 2")
         a_t = self._to_tensor(a)
         b_t = self._to_tensor(b)
-        frames = []
-        for k in range(1, factor):
-            out = self.compose(a_t, b_t, self.synthesize(a_t, b_t, k / factor))
-            frames.append((out[0].permute(1, 2, 0).float().clamp(0, 1).cpu().numpy() * 255.0 + 0.5).astype(np.uint8))
-        return frames
+        n = factor - 1
+        phases = torch.tensor([k / factor for k in range(1, factor)], device=a_t.device, dtype=a_t.dtype)
+        a_n, b_n = a_t.expand(n, -1, -1, -1), b_t.expand(n, -1, -1, -1)
+        out = self.compose(a_n, b_n, self.synthesize(a_n, b_n, phases))
+        frames = (out.permute(0, 2, 3, 1).float().clamp(0, 1).cpu().numpy() * 255.0 + 0.5).astype(np.uint8)
+        return [frames[i] for i in range(n)]
+
+    @torch.no_grad()
+    def generate_pairs(self, frames: list[np.ndarray], factor: int = 2) -> list[list[np.ndarray]]:
+        """For consecutive frames f0..fk, the generated frames of every pair (f_i, f_{i+1}) in one batch
+        of (k * (factor - 1)) samples; returns one list per pair."""
+        if factor < 2:
+            raise ValueError("factor must be >= 2")
+        if len(frames) < 2:
+            return []
+        pairs = len(frames) - 1
+        n = factor - 1
+        a_t = torch.cat([self._to_tensor(f) for f in frames[:-1]], 0)
+        b_t = torch.cat([self._to_tensor(f) for f in frames[1:]], 0)
+        a_n = a_t.repeat_interleave(n, 0)
+        b_n = b_t.repeat_interleave(n, 0)
+        phases = torch.tensor([k / factor for k in range(1, factor)] * pairs, device=a_t.device, dtype=a_t.dtype)
+        out = self.compose(a_n, b_n, self.synthesize(a_n, b_n, phases))
+        arr = (out.permute(0, 2, 3, 1).float().clamp(0, 1).cpu().numpy() * 255.0 + 0.5).astype(np.uint8)
+        return [[arr[p * n + i] for i in range(n)] for p in range(pairs)]

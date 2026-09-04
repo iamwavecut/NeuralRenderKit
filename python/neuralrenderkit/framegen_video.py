@@ -56,6 +56,7 @@ class FrameGenOptions:
     nrk: str | None = None
     nrk_weights: str | None = None    # dense safetensors for the Swift runtime (defaults to the torch weights path)
     nrk_precision: str = "float16"
+    batch: int = 4                    # consecutive pairs generated per pass (both backends)
 
 
 @dataclass
@@ -84,6 +85,8 @@ def interpolate_video(
 ) -> FrameGenResult:
     """Decode ``source``, generate ``factor - 1`` frames between every consecutive pair, encode.
 
+    Pairs are generated ``options.batch`` at a time; the output keeps the stream order
+    (frame, generated frames, next frame, ...) by holding input frames until their pair is done.
     ``progress(input_frames_done, input_frames_expected)`` is called per input frame;
     ``should_stop()`` is polled per input frame and ends the job early."""
     options = options or FrameGenOptions()
@@ -139,7 +142,8 @@ def interpolate_video(
     if options.backend == "nrk":
         from .nrk_stream import NRKFrameGenStream
 
-        stream = NRKFrameGenStream(options.nrk_weights, info.width, info.height, factor=options.factor, precision=options.nrk_precision, nrk=options.nrk)
+        stream = NRKFrameGenStream(options.nrk_weights, info.width, info.height, factor=options.factor, precision=options.nrk_precision,
+                                   nrk=options.nrk, batch=options.batch)
     decoder = subprocess.Popen(decode, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     encoder = subprocess.Popen(encode, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
     started = time.perf_counter(); last_status = started
@@ -150,8 +154,22 @@ def interpolate_video(
         encoder.stdin.write(np.ascontiguousarray(frame).tobytes())
         frames_out += 1
 
+    per_pair = options.factor - 1
+    batch = max(1, int(options.batch))
+    held: list[np.ndarray] = []       # input frames whose preceding generated frames are not written yet
+
+    def emit(generated: list[np.ndarray]) -> None:
+        """Write the generated frames of the oldest held pairs, each followed by its input frame."""
+        pairs = len(generated) // per_pair
+        for i in range(pairs):
+            for g in generated[i * per_pair:(i + 1) * per_pair]:
+                write(g)
+            write(held[i])
+        del held[:pairs]
+
     try:
         previous: np.ndarray | None = None
+        window: list[np.ndarray] = []     # torch backend: the frames of the current window
         while True:
             if should_stop is not None and should_stop():
                 break
@@ -162,13 +180,17 @@ def interpolate_video(
             frames_in += 1
             if progress is not None:
                 progress(frames_in, expected)
+            if previous is None:
+                write(frame)
+            else:
+                held.append(frame)
             if stream is not None:
-                for generated in stream.push(frame):
-                    write(generated)
-            elif previous is not None:
-                for generated in generator.generate(previous, frame, options.factor):
-                    write(generated)
-            write(frame)
+                emit(stream.push(frame))
+            else:
+                window.append(frame)
+                if len(window) == batch + 1:
+                    emit([g for pair in generator.generate_pairs(window, options.factor) for g in pair])
+                    window = [window[-1]]
             previous = frame
             now = time.perf_counter()
             if now - last_status >= options.status_interval:
@@ -177,7 +199,13 @@ def interpolate_video(
                 log(f"STATUS {time.strftime('%H:%M:%S')} frames {frames_in}/{expected if expected is not None else '?'} {rate:.2f} fps{eta}")
                 last_status = now
         if stream is not None:
+            emit(stream.finish())
             stream.close()
+        elif len(window) >= 2:
+            emit([g for pair in generator.generate_pairs(window, options.factor) for g in pair])
+        for frame in held:                # a stopped job: input frames whose pairs were never generated
+            write(frame)
+        held.clear()
         encoder.stdin.close()
         decoder_error = decoder.stderr.read().decode(errors="replace").strip()
         encoder_error = encoder.stderr.read().decode(errors="replace").strip()

@@ -17,6 +17,11 @@ import MLXNN
 ///   export = [2 f0 + f1, m0 + m1, r0 + r1]                   (half resolution)
 ///   out    = m * warp(A, 2 flowA) + (1 - m) * warp(B, 2 flowB), m = sigmoid(mask) upsampled
 ///
+/// Every stage takes a batch: `[N, H, W, C]` frames with one phase per sample,
+/// so the phases of a multi-frame factor and consecutive pairs of a video run
+/// in one pass (the per-frame cost is the latency of ~30 small dispatches;
+/// batching amortises it).
+///
 /// Weights: the dense `[Cout, Cin, 3, 3]` fp16 tensors written by
 /// `nrk-weights extract-fg` from the user's own `libnvidia-ngx-dlssg.so`.
 public final class FrameGenerator {
@@ -46,8 +51,12 @@ public final class FrameGenerator {
   private let block1: Block
   /// `NRK_FG_COMPILE=0` runs the eager graph (diagnostics).
   nonisolated(unsafe) static var compileEnabled: Bool = ProcessInfo.processInfo.environment["NRK_FG_COMPILE"] != "0"
+  /// `NRK_FG_PROFILE=1` prints per-stage timings (eager path only) to stderr.
+  nonisolated(unsafe) static var profileEnabled: Bool = ProcessInfo.processInfo.environment["NRK_FG_PROFILE"] == "1"
+  /// `NRK_FG_FUSED_INPUTS=0` assembles the block inputs with MLX operations (diagnostics).
+  nonisolated(unsafe) static var fusedInputsEnabled: Bool = ProcessInfo.processInfo.environment["NRK_FG_FUSED_INPUTS"] != "0"
   private lazy var compiledSynthesize: @Sendable ([MLXArray]) -> [MLXArray] = compile(shapeless: false) { [self] inputs in
-    [self.synthesizeGraph(inputs[0], inputs[1], phase: inputs[2])]
+    [self.synthesizeGraph(inputs[0], inputs[1], phases: inputs[2])]
   }
 
   /// Tensor names the dense weight file must contain.
@@ -146,7 +155,7 @@ public final class FrameGenerator {
     return x.reshaped([n, h / 2, 2, w / 2, 2, c]).mean(axes: [2, 4])
   }
 
-  /// 2x2 box mean of a full-resolution frame, zero-padded to a multiple of 16 (the library's tile).
+  /// 2x2 box mean of full-resolution frames, zero-padded to a multiple of 16 (the library's tile).
   static func box2(_ x: MLXArray) -> MLXArray {
     let (h, w) = (x.dim(1), x.dim(2))
     let pooled = meanPool2(x[0..., 0..<(h / 2 * 2), 0..<(w / 2 * 2), 0...])
@@ -233,7 +242,7 @@ public final class FrameGenerator {
     return (outs[0], outs[1], outs[2])
   }
 
-  // MARK: - Metal kernels
+  // MARK: - Metal kernels (all batch-aware: sample n = index / (pixels per sample))
 
   /// Bilinear x2 upsample with the half-pixel convention (PyTorch align_corners=False), NHWC.
   private static let up2Kernel = MLXFast.metalKernel(
@@ -241,16 +250,20 @@ public final class FrameGenerator {
     inputNames: ["input", "params"],
     outputNames: ["out"],
     source: #"""
-      // One thread per output pixel: params = [inHeight, inWidth, channels].
+      // One thread per output pixel of every sample: params = [inHeight, inWidth, channels, batch].
       const uint index = thread_position_in_grid.x;
       const int ih = int(params[0]);
       const int iw = int(params[1]);
       const uint channels = params[2];
+      const uint batch = params[3];
       const uint oh = uint(ih) * 2;
       const uint ow = uint(iw) * 2;
-      if (index >= oh * ow) { return; }
-      const uint y = index / ow;
-      const uint x = index % ow;
+      if (index >= oh * ow * batch) { return; }
+      const uint n = index / (oh * ow);
+      const uint p = index % (oh * ow);
+      const uint y = p / ow;
+      const uint x = p % ow;
+      auto src = input + n * uint(ih) * uint(iw) * channels;   // the input dtype is a template parameter
       const float sx = max((float(x) + 0.5f) * 0.5f - 0.5f, 0.0f);
       const float sy = max((float(y) + 0.5f) * 0.5f - 0.5f, 0.0f);
       const int x0 = min(int(sx), iw - 1);
@@ -260,10 +273,10 @@ public final class FrameGenerator {
       const float tx = sx - float(x0);
       const float ty = sy - float(y0);
       for (uint c = 0; c < channels; ++c) {
-        const float v00 = float(input[(y0 * iw + x0) * channels + c]);
-        const float v01 = float(input[(y0 * iw + x1) * channels + c]);
-        const float v10 = float(input[(y1 * iw + x0) * channels + c]);
-        const float v11 = float(input[(y1 * iw + x1) * channels + c]);
+        const float v00 = float(src[(y0 * iw + x0) * channels + c]);
+        const float v01 = float(src[(y0 * iw + x1) * channels + c]);
+        const float v10 = float(src[(y1 * iw + x0) * channels + c]);
+        const float v11 = float(src[(y1 * iw + x1) * channels + c]);
         out[index * channels + c] = (1 - tx) * (1 - ty) * v00 + tx * (1 - ty) * v01 + (1 - tx) * ty * v10 + tx * ty * v11;
       }
       """#
@@ -276,18 +289,22 @@ public final class FrameGenerator {
     inputNames: ["a", "b", "phase", "params"],
     outputNames: ["out"],
     source: #"""
-      // params = [H, W, hp, wp]; phase: [1]; a, b: [1,H,W,3]; out: [1,hp,wp,16] half
+      // params = [H, W, hp, wp, batch]; phase: [batch]; a, b: [batch,H,W,3] float; out: [batch,hp,wp,16] half
       const uint index = thread_position_in_grid.x;
       const int H = int(params[0]);
       const int W = int(params[1]);
       const int hp = int(params[2]);
       const int wp = int(params[3]);
-      const float phaseValue = float(phase[0]);
-      if (index >= uint(hp * wp)) { return; }
-      const int y = int(index) / wp;
-      const int x = int(index) % wp;
+      const uint batch = params[4];
+      if (index >= uint(hp * wp) * batch) { return; }
+      const uint n = index / uint(hp * wp);
+      const uint p = index % uint(hp * wp);
+      const int y = int(p) / wp;
+      const int x = int(p) % wp;
+      const float phaseValue = float(phase[n]);
+      const device float* fa = a + n * uint(H * W * 3);
+      const device float* fb = b + n * uint(H * W * 3);
       const int h2 = H / 2, w2 = W / 2;
-      // box2 of a frame at half-res pixel (yy, xx), zero outside the pooled area
       auto box = [&](const device float* img, int yy, int xx, thread float* rgb) {
         if (yy < 0 || yy >= h2 || xx < 0 || xx >= w2) { rgb[0] = rgb[1] = rgb[2] = 0.0f; return; }
         for (int c = 0; c < 3; ++c) {
@@ -296,15 +313,14 @@ public final class FrameGenerator {
         }
       };
       float ra[3], rb[3];
-      box(a, y, x, ra); box(b, y, x, rb);
-      // blurred error over the 3x3 neighbourhood, borders replicated within the padded grid
+      box(fa, y, x, ra); box(fb, y, x, rb);
       const float k[3] = {0.125f, 0.75f, 0.125f};
       float err = 0.0f;
       for (int dy = -1; dy <= 1; ++dy) {
         for (int dx = -1; dx <= 1; ++dx) {
           const int yy = clamp(y + dy, 0, hp - 1), xx = clamp(x + dx, 0, wp - 1);
           float ta[3], tb[3];
-          box(a, yy, xx, ta); box(b, yy, xx, tb);
+          box(fa, yy, xx, ta); box(fb, yy, xx, tb);
           const float d = (fabs(ta[0] - tb[0]) + fabs(ta[1] - tb[1]) + fabs(ta[2] - tb[2])) / 3.0f;
           err += k[dy + 1] * k[dx + 1] * d;
         }
@@ -317,16 +333,16 @@ public final class FrameGenerator {
       """#
   )
 
-  /// `[1,hp,wp,16]` block0 input from full-res float32 frames (see the kernel).
-  static func block0Input(_ a: MLXArray, _ b: MLXArray, phase: MLXArray) -> MLXArray {
-    let (h, w) = (a.dim(1), a.dim(2))
+  /// `[N,hp,wp,16]` block0 input from full-res float32 frames `[N,H,W,3]` and `phases` `[N]`.
+  static func block0Input(_ a: MLXArray, _ b: MLXArray, phases: MLXArray) -> MLXArray {
+    let (n, h, w) = (a.dim(0), a.dim(1), a.dim(2))
     let hp = (h / 2 + 15) / 16 * 16, wp = (w / 2 + 15) / 16 * 16
-    let params = MLXArray([UInt32(h), UInt32(w), UInt32(hp), UInt32(wp)])
-    let count = hp * wp
+    let params = MLXArray([UInt32(h), UInt32(w), UInt32(hp), UInt32(wp), UInt32(n)])
+    let count = n * hp * wp
     return block0InputKernel(
-      [contiguous(a.asType(.float32)), contiguous(b.asType(.float32)), phase.asType(.float32).reshaped([1]), params],
+      [contiguous(a.asType(.float32)), contiguous(b.asType(.float32)), contiguous(phases.asType(.float32).reshaped([n])), params],
       grid: (count, 1, 1), threadGroup: (min(count, 256), 1, 1),
-      outputShapes: [[1, hp, wp, 16]], outputDTypes: [.float16]
+      outputShapes: [[n, hp, wp, 16]], outputDTypes: [.float16]
     )[0]
   }
 
@@ -337,17 +353,21 @@ public final class FrameGenerator {
     inputNames: ["cand", "coarse", "phase", "params"],
     outputNames: ["out"],
     source: #"""
-      // cand: [1,hp,wp,16] block0 input (channels 0-3 = candA, 4-7 = candB); coarse: [1,hp/2,wp/2,8]
-      // params = [hp, wp]; phase: [1]; out: [1,hp,wp,24] half
+      // cand: [batch,hp,wp,16] (channels 0-3 = candA, 4-7 = candB); coarse: [batch,hp/2,wp/2,8]
+      // params = [hp, wp, batch]; phase: [batch]; out: [batch,hp,wp,24] half
       const uint index = thread_position_in_grid.x;
       const int hp = int(params[0]);
       const int wp = int(params[1]);
-      const float phaseValue = float(phase[0]);
-      if (index >= uint(hp * wp)) { return; }
-      const int y = int(index) / wp;
-      const int x = int(index) % wp;
+      const uint batch = params[2];
+      if (index >= uint(hp * wp) * batch) { return; }
+      const uint n = index / uint(hp * wp);
+      const uint p = index % uint(hp * wp);
+      const int y = int(p) / wp;
+      const int x = int(p) % wp;
+      const float phaseValue = float(phase[n]);
       const int ch = hp / 2, cw = wp / 2;
-      // bilinear x2 upsample of the 8 coarse channels
+      const device half* cn = cand + n * uint(hp * wp * 16);
+      const device half* co = coarse + n * uint(ch * cw * 8);
       const float sx = max((float(x) + 0.5f) * 0.5f - 0.5f, 0.0f);
       const float sy = max((float(y) + 0.5f) * 0.5f - 0.5f, 0.0f);
       const int cx0 = min(int(sx), cw - 1), cy0 = min(int(sy), ch - 1);
@@ -355,11 +375,10 @@ public final class FrameGenerator {
       const float tx = sx - float(cx0), ty = sy - float(cy0);
       float up[8];
       for (int c = 0; c < 8; ++c) {
-        up[c] = (1 - tx) * (1 - ty) * float(coarse[(cy0 * cw + cx0) * 8 + c]) + tx * (1 - ty) * float(coarse[(cy0 * cw + cx1) * 8 + c])
-              + (1 - tx) * ty * float(coarse[(cy1 * cw + cx0) * 8 + c]) + tx * ty * float(coarse[(cy1 * cw + cx1) * 8 + c]);
+        up[c] = (1 - tx) * (1 - ty) * float(co[(cy0 * cw + cx0) * 8 + c]) + tx * (1 - ty) * float(co[(cy0 * cw + cx1) * 8 + c])
+              + (1 - tx) * ty * float(co[(cy1 * cw + cx0) * 8 + c]) + tx * ty * float(co[(cy1 * cw + cx1) * 8 + c]);
       }
       device half* o = out + index * 24;
-      // warps of the 4-channel candidates by twice the coarse flow (border clamped)
       for (int which = 0; which < 2; ++which) {
         const float px = float(x) + 2.0f * up[which * 2];
         const float py = float(y) + 2.0f * up[which * 2 + 1];
@@ -369,8 +388,8 @@ public final class FrameGenerator {
         const int y0 = clamp(int(fy0), 0, hp - 1), y1 = clamp(int(fy0) + 1, 0, hp - 1);
         for (int c = 0; c < 4; ++c) {
           const int cc = which * 4 + c;
-          const float v = (1 - wx) * (1 - wy) * float(cand[(y0 * wp + x0) * 16 + cc]) + wx * (1 - wy) * float(cand[(y0 * wp + x1) * 16 + cc])
-                        + (1 - wx) * wy * float(cand[(y1 * wp + x0) * 16 + cc]) + wx * wy * float(cand[(y1 * wp + x1) * 16 + cc]);
+          const float v = (1 - wx) * (1 - wy) * float(cn[(y0 * wp + x0) * 16 + cc]) + wx * (1 - wy) * float(cn[(y0 * wp + x1) * 16 + cc])
+                        + (1 - wx) * wy * float(cn[(y1 * wp + x0) * 16 + cc]) + wx * wy * float(cn[(y1 * wp + x1) * 16 + cc]);
           o[which * 4 + c] = v;
         }
       }
@@ -383,46 +402,50 @@ public final class FrameGenerator {
       """#
   )
 
-  /// `[1,hp,wp,24]` block1 input from the block0 input and block0's coarse `[1,hp/2,wp/2,8]` output.
-  static func block1Input(_ cand: MLXArray, coarse: MLXArray, phase: MLXArray) -> MLXArray {
-    let (hp, wp) = (cand.dim(1), cand.dim(2))
-    let params = MLXArray([UInt32(hp), UInt32(wp)])
-    let count = hp * wp
+  /// `[N,hp,wp,24]` block1 input from the block0 input and block0's coarse `[N,hp/2,wp/2,8]` output.
+  static func block1Input(_ cand: MLXArray, coarse: MLXArray, phases: MLXArray) -> MLXArray {
+    let (n, hp, wp) = (cand.dim(0), cand.dim(1), cand.dim(2))
+    let params = MLXArray([UInt32(hp), UInt32(wp), UInt32(n)])
+    let count = n * hp * wp
     return block1InputKernel(
-      [contiguous(cand.asType(.float16)), contiguous(coarse.asType(.float16)), phase.asType(.float32).reshaped([1]), params],
+      [contiguous(cand.asType(.float16)), contiguous(coarse.asType(.float16)), contiguous(phases.asType(.float32).reshaped([n])), params],
       grid: (count, 1, 1), threadGroup: (min(count, 256), 1, 1),
-      outputShapes: [[1, hp, wp, 24]], outputDTypes: [.float16]
+      outputShapes: [[n, hp, wp, 24]], outputDTypes: [.float16]
     )[0]
   }
 
-  /// `[1,h,w,C]` -> `[1,2h,2w,C]`, bilinear, half-pixel centres.
+  /// `[N,h,w,C]` -> `[N,2h,2w,C]`, bilinear, half-pixel centres.
   public static func upsample2(_ x: MLXArray) -> MLXArray {
-    let (h, w, c) = (x.dim(1), x.dim(2), x.dim(3))
-    let params = MLXArray([UInt32(h), UInt32(w), UInt32(c)])
-    let count = 4 * h * w
+    let (n, h, w, c) = (x.dim(0), x.dim(1), x.dim(2), x.dim(3))
+    let params = MLXArray([UInt32(h), UInt32(w), UInt32(c), UInt32(n)])
+    let count = n * 4 * h * w
     return up2Kernel(
       [contiguous(x), params],
       grid: (count, 1, 1),
       threadGroup: (min(count, 256), 1, 1),
-      outputShapes: [[1, 2 * h, 2 * w, c]],
+      outputShapes: [[n, 2 * h, 2 * w, c]],
       outputDTypes: [x.dtype]
     )[0]
   }
 
-  /// Backward bilinear warp of an NHWC image by per-pixel offsets (in pixels), borders clamped.
+  /// Backward bilinear warp of NHWC images by per-pixel offsets (in pixels), borders clamped.
   private static let warpKernel = MLXFast.metalKernel(
     name: "nrk_fg_warp",
     inputNames: ["image", "flow", "params"],
     outputNames: ["out"],
     source: #"""
-      // One thread per output pixel: params = [height, width, channels].
+      // One thread per output pixel: params = [height, width, channels, batch]; flow [batch,H,W,2].
       const uint index = thread_position_in_grid.x;
       const uint height = params[0];
       const uint width = params[1];
       const uint channels = params[2];
-      if (index >= height * width) { return; }
-      const uint y = index / width;
-      const uint x = index % width;
+      const uint batch = params[3];
+      if (index >= height * width * batch) { return; }
+      const uint n = index / (height * width);
+      const uint p = index % (height * width);
+      const uint y = p / width;
+      const uint x = p % width;
+      auto img = image + n * height * width * channels;
       const float px = float(x) + float(flow[index * 2]);
       const float py = float(y) + float(flow[index * 2 + 1]);
       const float fx0 = floor(px);
@@ -434,10 +457,10 @@ public final class FrameGenerator {
       const int y0 = clamp(int(fy0), 0, int(height) - 1);
       const int y1 = clamp(int(fy0) + 1, 0, int(height) - 1);
       for (uint c = 0; c < channels; ++c) {
-        const float v00 = float(image[(y0 * width + x0) * channels + c]);
-        const float v01 = float(image[(y0 * width + x1) * channels + c]);
-        const float v10 = float(image[(y1 * width + x0) * channels + c]);
-        const float v11 = float(image[(y1 * width + x1) * channels + c]);
+        const float v00 = float(img[(y0 * width + x0) * channels + c]);
+        const float v01 = float(img[(y0 * width + x1) * channels + c]);
+        const float v10 = float(img[(y1 * width + x0) * channels + c]);
+        const float v11 = float(img[(y1 * width + x1) * channels + c]);
         out[index * channels + c] = (1 - tx) * (1 - ty) * v00 + tx * (1 - ty) * v01 + (1 - tx) * ty * v10 + tx * ty * v11;
       }
       """#
@@ -450,7 +473,7 @@ public final class FrameGenerator {
     inputNames: ["a", "b", "coarse", "params"],
     outputNames: ["out"],
     source: #"""
-      // One thread per output pixel: params = [height, width, coarseHeight, coarseWidth, scale(bits), channels, sigmoidMask].
+      // One thread per output pixel: params = [height, width, coarseHeight, coarseWidth, scale(bits), channels, sigmoidMask, batch].
       const uint index = thread_position_in_grid.x;
       const uint height = params[0];
       const uint width = params[1];
@@ -459,9 +482,15 @@ public final class FrameGenerator {
       const float scale = as_type<float>(params[4]);
       const int cc = int(params[5]);
       const bool sigmoidMask = params[6] != 0u;
-      if (index >= height * width) { return; }
-      const uint y = index / width;
-      const uint x = index % width;
+      const uint batch = params[7];
+      if (index >= height * width * batch) { return; }
+      const uint n = index / (height * width);
+      const uint p = index % (height * width);
+      const uint y = p / width;
+      const uint x = p % width;
+      auto fa = a + n * height * width * 3;          // dtypes are template parameters
+      auto fb = b + n * height * width * 3;
+      auto co = coarse + n * uint(ch * cw * cc);
       const float u = min(float(x) / scale, float(cw - 1));
       const float v = min(float(y) / scale, float(ch - 1));
       const float u0 = floor(u);
@@ -474,10 +503,10 @@ public final class FrameGenerator {
       const int cy1 = clamp(int(v0) + 1, 0, ch - 1);
       float up[5];
       for (uint c = 0; c < 5; ++c) {
-        float s00 = float(coarse[(cy0 * cw + cx0) * cc + c]);
-        float s01 = float(coarse[(cy0 * cw + cx1) * cc + c]);
-        float s10 = float(coarse[(cy1 * cw + cx0) * cc + c]);
-        float s11 = float(coarse[(cy1 * cw + cx1) * cc + c]);
+        float s00 = float(co[(cy0 * cw + cx0) * cc + c]);
+        float s01 = float(co[(cy0 * cw + cx1) * cc + c]);
+        float s10 = float(co[(cy1 * cw + cx0) * cc + c]);
+        float s11 = float(co[(cy1 * cw + cx1) * cc + c]);
         if (c == 4 && sigmoidMask) {
           s00 = 1.0f / (1.0f + exp(-s00)); s01 = 1.0f / (1.0f + exp(-s01)); s10 = 1.0f / (1.0f + exp(-s10)); s11 = 1.0f / (1.0f + exp(-s11));
         }
@@ -497,15 +526,10 @@ public final class FrameGenerator {
         const int y0 = clamp(int(fy0), 0, int(height) - 1);
         const int y1 = clamp(int(fy0) + 1, 0, int(height) - 1);
         const float weight = which == 0 ? m : (1 - m);
+        auto img = which == 0 ? fa : fb;
         for (uint c = 0; c < 3; ++c) {
-          float v00, v01, v10, v11;
-          if (which == 0) {
-            v00 = float(a[(y0 * width + x0) * 3 + c]); v01 = float(a[(y0 * width + x1) * 3 + c]);
-            v10 = float(a[(y1 * width + x0) * 3 + c]); v11 = float(a[(y1 * width + x1) * 3 + c]);
-          } else {
-            v00 = float(b[(y0 * width + x0) * 3 + c]); v01 = float(b[(y0 * width + x1) * 3 + c]);
-            v10 = float(b[(y1 * width + x0) * 3 + c]); v11 = float(b[(y1 * width + x1) * 3 + c]);
-          }
+          const float v00 = float(img[(y0 * width + x0) * 3 + c]), v01 = float(img[(y0 * width + x1) * 3 + c]);
+          const float v10 = float(img[(y1 * width + x0) * 3 + c]), v11 = float(img[(y1 * width + x1) * 3 + c]);
           rgb[c] += weight * ((1 - tx) * (1 - ty) * v00 + tx * (1 - ty) * v01 + (1 - tx) * ty * v10 + tx * ty * v11);
         }
       }
@@ -513,13 +537,13 @@ public final class FrameGenerator {
       """#
   )
 
-  /// `image` [1,H,W,C], `flow` [1,H,W,2] pixel offsets -> [1,H,W,C].
+  /// `image` [N,H,W,C], `flow` [N,H,W,2] pixel offsets -> [N,H,W,C] in the image's dtype.
   static func warp(_ image: MLXArray, flow: MLXArray) -> MLXArray {
-    let (h, w, c) = (image.dim(1), image.dim(2), image.dim(3))
-    let params = MLXArray([UInt32(h), UInt32(w), UInt32(c)])
-    let count = h * w
+    let (n, h, w, c) = (image.dim(0), image.dim(1), image.dim(2), image.dim(3))
+    let params = MLXArray([UInt32(h), UInt32(w), UInt32(c), UInt32(n)])
+    let count = n * h * w
     return warpKernel(
-      [contiguous(image), contiguous(flow), params],
+      [contiguous(image), contiguous(flow.asType(image.dtype)), params],
       grid: (count, 1, 1),
       threadGroup: (min(count, 256), 1, 1),
       outputShapes: [image.shape],
@@ -527,40 +551,38 @@ public final class FrameGenerator {
     )[0]
   }
 
-  /// `a`, `b` [1,H,W,3] full frames; `coarse` [1,h,w,5] = (flowA, flowB, sigmoid mask) -> [1,H,W,3].
+  /// `a`, `b` [N,H,W,3] frames; `coarse` [N,h,w,C] (flowA, flowB, mask[, ...]) -> [N,H,W,3] in the frames' dtype.
   public static func compose(_ a: MLXArray, _ b: MLXArray, coarse: MLXArray, scale: Float = 2, sigmoidMask: Bool = false) -> MLXArray {
-    let (h, w) = (a.dim(1), a.dim(2))
-    let params = MLXArray([UInt32(h), UInt32(w), UInt32(coarse.dim(1)), UInt32(coarse.dim(2)), scale.bitPattern, UInt32(coarse.dim(3)), sigmoidMask ? 1 : 0])
-    let count = h * w
+    let (n, h, w) = (a.dim(0), a.dim(1), a.dim(2))
+    let params = MLXArray([UInt32(h), UInt32(w), UInt32(coarse.dim(1)), UInt32(coarse.dim(2)), scale.bitPattern, UInt32(coarse.dim(3)), sigmoidMask ? 1 : 0, UInt32(n)])
+    let count = n * h * w
     return composeKernel(
-      [contiguous(a), contiguous(b), contiguous(coarse), params],
+      [contiguous(a), contiguous(b.asType(a.dtype)), contiguous(coarse), params],
       grid: (count, 1, 1),
       threadGroup: (min(count, 256), 1, 1),
-      outputShapes: [a.shape],
+      outputShapes: [[n, h, w, 3]],
       outputDTypes: [a.dtype]
     )[0]
   }
 
   // MARK: - Public API
 
-  /// Half-resolution export `[1, h, w, 8]`: flowA.xy, flowB.xy, mask logit, residual.rgb.
-  public func synthesize(_ aFull: MLXArray, _ bFull: MLXArray, phase: Float) -> MLXArray {
-    let phaseArray = MLXArray(phase)
+  /// Half-resolution export `[N, h, w, 8]`: flowA.xy, flowB.xy, mask logit, residual.rgb, for `[N,H,W,3]` frames and `[N]` phases.
+  public func synthesize(_ aFull: MLXArray, _ bFull: MLXArray, phases: MLXArray) -> MLXArray {
     if Self.compileEnabled {
-      return compiledSynthesize([aFull, bFull, phaseArray])[0]
+      return compiledSynthesize([aFull, bFull, phases])[0]
     }
-    return synthesizeGraph(aFull, bFull, phase: phaseArray)
+    return synthesizeGraph(aFull, bFull, phases: phases)
   }
 
-  /// `NRK_FG_PROFILE=1` prints per-stage timings (eager path only) to stderr.
-  nonisolated(unsafe) static var profileEnabled: Bool = ProcessInfo.processInfo.environment["NRK_FG_PROFILE"] == "1"
+  /// One phase for the whole batch.
+  public func synthesize(_ aFull: MLXArray, _ bFull: MLXArray, phase: Float) -> MLXArray {
+    synthesize(aFull, bFull, phases: MLXArray(Array(repeating: phase, count: aFull.dim(0))))
+  }
 
-  /// `NRK_FG_FUSED_INPUTS=0` assembles the block inputs with MLX operations (diagnostics).
-  nonisolated(unsafe) static var fusedInputsEnabled: Bool = ProcessInfo.processInfo.environment["NRK_FG_FUSED_INPUTS"] != "0"
-
-  private func synthesizeGraph(_ aFull: MLXArray, _ bFull: MLXArray, phase: MLXArray) -> MLXArray {
+  private func synthesizeGraph(_ aFull: MLXArray, _ bFull: MLXArray, phases: MLXArray) -> MLXArray {
     if Self.fusedInputsEnabled, dtype == .float16, FrameGenerationFusedConv.enabled, block0.fusedHeads != nil {
-      return synthesizeFused(aFull, bFull, phase: phase)
+      return synthesizeFused(aFull, bFull, phases: phases)
     }
     let clock = ContinuousClock()
     var mark = clock.now
@@ -572,11 +594,12 @@ public final class FrameGenerator {
       FileHandle.standardError.write(Data("  \(name.padding(toLength: 22, withPad: " ", startingAt: 0)) \(String(format: "%7.2f", ms)) ms\n".utf8))
       mark = now
     }
+    let n = aFull.dim(0)
     let a = Self.box2(aFull.asType(dtype))
     let b = Self.box2(bFull.asType(dtype))
     let err = Self.photometricError(a, b)
     let zero = MLXArray.zeros(err.shape, dtype: dtype)
-    let t = broadcast(phase.asType(dtype), to: err.shape)
+    let t = broadcast(phases.asType(dtype).reshaped([n, 1, 1, 1]), to: err.shape)
     let candA = concatenated([a, err], axis: 3)
     let candB = concatenated([b, err], axis: 3)
     lap("candidates", candA, candB)
@@ -595,11 +618,11 @@ public final class FrameGenerator {
   }
 
   /// The float16 graph with the block inputs assembled by single kernels.
-  private func synthesizeFused(_ aFull: MLXArray, _ bFull: MLXArray, phase: MLXArray) -> MLXArray {
-    let input0 = Self.block0Input(aFull, bFull, phase: phase)              // [1,hp,wp,16]
-    let (f0c, m0c, r0c) = run(block0, input0)                               // coarse [1,hp/2,wp/2,·]
+  private func synthesizeFused(_ aFull: MLXArray, _ bFull: MLXArray, phases: MLXArray) -> MLXArray {
+    let input0 = Self.block0Input(aFull, bFull, phases: phases)             // [N,hp,wp,16]
+    let (f0c, m0c, r0c) = run(block0, input0)                               // coarse [N,hp/2,wp/2,·]
     let coarse = concatenated([f0c, m0c, r0c], axis: 3)                     // [.., 8]
-    let input1 = Self.block1Input(input0, coarse: coarse, phase: phase)     // [1,hp,wp,24]
+    let input1 = Self.block1Input(input0, coarse: coarse, phases: phases)   // [N,hp,wp,24]
     let (f1, m1, r1) = run(block1, input1)
     let up = Self.upsample2(coarse)
     let flow: MLXArray = up[0..., 0..., 0..., 0..<4] * 2 + f1
@@ -609,11 +632,12 @@ public final class FrameGenerator {
 
   /// Diagnostics: the graph up to a stage (0 candidates, 1 block0, 2 warps, 3 block1), eager.
   public func synthesizeUpTo(_ stage: Int, _ aFull: MLXArray, _ bFull: MLXArray, phase: Float) -> MLXArray {
+    let n = aFull.dim(0)
     let a = Self.box2(aFull.asType(dtype))
     let b = Self.box2(bFull.asType(dtype))
     let err = Self.photometricError(a, b)
     let zero = MLXArray.zeros(err.shape, dtype: dtype)
-    let t = broadcast(MLXArray(phase).asType(dtype), to: err.shape)
+    let t = broadcast(MLXArray(Array(repeating: phase, count: n)).asType(dtype).reshaped([n, 1, 1, 1]), to: err.shape)
     let candA = concatenated([a, err], axis: 3)
     let candB = concatenated([b, err], axis: 3)
     if stage == 0 { return concatenated([candA, candB], axis: 3) }
@@ -628,19 +652,52 @@ public final class FrameGenerator {
     return concatenated([f0 * 2 + f1, m0 + m1, r0 + r1], axis: 3)
   }
 
-  /// The interpolated frame `[1, H, W, 3]` in [0, 1] between `a` and `b` (NHWC RGB in [0, 1]) at `phase`.
-  public func interpolate(_ a: MLXArray, _ b: MLXArray, phase: Float = 0.5) throws -> MLXArray {
-    guard a.ndim == 4, a.dim(0) == 1, a.dim(3) == 3 else { throw Error(description: "frames must be [1, H, W, 3], got \(a.shape)") }
+  private func check(_ a: MLXArray, _ b: MLXArray) throws {
+    guard a.ndim == 4, a.dim(3) == 3 else { throw Error(description: "frames must be [N, H, W, 3], got \(a.shape)") }
     guard a.shape == b.shape else { throw Error(description: "frames differ in shape: \(a.shape) vs \(b.shape)") }
-    let export = synthesize(a, b, phase: phase)
-    let out = Self.compose(a.asType(.float32), b.asType(.float32), coarse: export, sigmoidMask: true)
+  }
+
+  /// Interpolated frames `[N, H, W, 3]` in [0, 1]: sample i is the frame between `a[i]` and `b[i]` at `phases[i]`.
+  /// `a` and `b` may hold one frame each (`[1, H, W, 3]`) for several phases.
+  public func interpolate(_ a: MLXArray, _ b: MLXArray, phases: [Float]) throws -> MLXArray {
+    try check(a, b)
+    guard !phases.isEmpty else { throw Error(description: "at least one phase is needed") }
+    var aa = a, bb = b
+    if a.dim(0) == 1, phases.count > 1 {
+      aa = broadcast(a, to: [phases.count, a.dim(1), a.dim(2), 3])
+      bb = broadcast(b, to: [phases.count, b.dim(1), b.dim(2), 3])
+    }
+    guard aa.dim(0) == phases.count else { throw Error(description: "\(phases.count) phases for \(aa.dim(0)) frame pairs") }
+    let export = synthesize(aa, bb, phases: MLXArray(phases))
+    let out = Self.compose(aa.asType(.float32), bb.asType(.float32), coarse: export, sigmoidMask: true)
     eval(out)
     return out
   }
 
-  /// `factor - 1` intermediate frames at phases k/factor.
+  /// The single frame `[1, H, W, 3]` between `a` and `b` at `phase`.
+  public func interpolate(_ a: MLXArray, _ b: MLXArray, phase: Float = 0.5) throws -> MLXArray {
+    try interpolate(a, b, phases: [phase])
+  }
+
+  /// `factor - 1` intermediate frames at phases k/factor, computed as one batch.
   public func generate(_ a: MLXArray, _ b: MLXArray, factor: Int) throws -> [MLXArray] {
     guard factor >= 2 else { throw Error(description: "factor must be at least 2") }
-    return try (1..<factor).map { try interpolate(a, b, phase: Float($0) / Float(factor)) }
+    let out = try interpolate(a, b, phases: (1..<factor).map { Float($0) / Float(factor) })
+    return (0..<(factor - 1)).map { out[$0..<($0 + 1)] }
+  }
+
+  /// For consecutive `frames` f0…fk (each `[1, H, W, 3]`), the `factor - 1` frames of every
+  /// pair (f_i, f_{i+1}) in one batch: returns `[k, factor - 1, H, W, 3]`-shaped nested lists.
+  public func generatePairs(_ frames: [MLXArray], factor: Int) throws -> [[MLXArray]] {
+    guard factor >= 2 else { throw Error(description: "factor must be at least 2") }
+    guard frames.count >= 2 else { return [] }
+    for f in frames { try check(f, frames[0]) }
+    let pairs = frames.count - 1
+    let n = factor - 1
+    let phases = (0..<pairs).flatMap { _ in (1..<factor).map { Float($0) / Float(factor) } }
+    let a = concatenated(frames.dropLast().flatMap { f in Array(repeating: f, count: n) }, axis: 0)
+    let b = concatenated(frames.dropFirst().flatMap { f in Array(repeating: f, count: n) }, axis: 0)
+    let out = try interpolate(a, b, phases: phases)
+    return (0..<pairs).map { p in (0..<n).map { i in out[(p * n + i)..<(p * n + i + 1)] } }
   }
 }

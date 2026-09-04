@@ -142,22 +142,43 @@ class NRKStreamSession:
 
 
 class NRKFrameGenStream:
-    """Frame generation through ``nrk framegen-stream`` (Metal): push frames in order, get the
-    ``factor - 1`` generated frames between the previous frame and the new one back as uint8."""
+    """Frame generation through ``nrk framegen-stream`` (Metal): push frames in order and collect the
+    ``factor - 1`` generated frames of every consecutive pair, in stream order, as uint8 arrays.
 
-    def __init__(self, weights: str | Path, width: int, height: int, *, factor: int = 2, precision: str = "float16", nrk: str | None = None):
-        self.width, self.height, self.factor = width, height, factor
+    The server computes ``batch`` pairs per pass, so a pair's frames come back once its window is
+    complete (``push`` returns them) or when the input ends (``finish`` returns the rest)."""
+
+    def __init__(self, weights: str | Path, width: int, height: int, *, factor: int = 2, precision: str = "float16",
+                 nrk: str | None = None, batch: int = 4):
+        self.width, self.height, self.factor, self.batch = width, height, factor, max(1, int(batch))
         command = [find_nrk(nrk), "framegen-stream", "--weights", str(weights), "--width", str(width), "--height", str(height),
-                   "--factor", str(factor), "--precision", precision]
+                   "--factor", str(factor), "--batch", str(self.batch), "--format", "u8", "--precision", precision]
         self.process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         self.frames = 0
+        self.pending_pairs = 0
+
+    def _read_frames(self, count: int) -> list[np.ndarray]:
+        expected = self.height * self.width * 3
+        outputs = []
+        for _ in range(count):
+            data = bytearray()
+            while len(data) < expected:
+                chunk = self.process.stdout.read(expected - len(data))
+                if not chunk:
+                    raise RuntimeError(f"nrk framegen-stream ended early: {self.process.stderr.read().decode(errors='replace')[-500:]}")
+                data += chunk
+            outputs.append(np.frombuffer(bytes(data), dtype=np.uint8).reshape(self.height, self.width, 3).copy())
+        return outputs
 
     def push(self, frame: np.ndarray) -> list[np.ndarray]:
-        """Send one uint8 (H, W, 3) frame; returns the generated frames after the first push."""
+        """Send one uint8 (H, W, 3) frame; returns the generated frames of every pair whose window
+        just completed (``batch * (factor - 1)`` frames, or none)."""
         frame = np.asarray(frame)
         if frame.shape != (self.height, self.width, 3):
             raise ValueError(f"frame must be ({self.height}, {self.width}, 3)")
-        payload = np.ascontiguousarray(frame.astype(np.float32) / 255.0 if frame.dtype == np.uint8 else frame.astype("<f4")).tobytes()
+        if frame.dtype != np.uint8:
+            frame = (np.clip(frame, 0, 1) * 255.0 + 0.5).astype(np.uint8)
+        payload = np.ascontiguousarray(frame).tobytes()
         try:
             self.process.stdin.write(payload); self.process.stdin.flush()
         except BrokenPipeError as error:
@@ -165,25 +186,31 @@ class NRKFrameGenStream:
         self.frames += 1
         if self.frames == 1:
             return []
-        expected = self.height * self.width * 3 * 4
-        outputs = []
-        for _ in range(self.factor - 1):
-            data = bytearray()
-            while len(data) < expected:
-                chunk = self.process.stdout.read(expected - len(data))
-                if not chunk:
-                    raise RuntimeError(f"nrk framegen-stream ended early: {self.process.stderr.read().decode(errors='replace')[-500:]}")
-                data += chunk
-            values = np.frombuffer(bytes(data), dtype="<f4").reshape(self.height, self.width, 3)
-            outputs.append((np.clip(values, 0, 1) * 255.0 + 0.5).astype(np.uint8))
+        self.pending_pairs += 1
+        if self.pending_pairs < self.batch:
+            return []
+        outputs = self._read_frames(self.pending_pairs * (self.factor - 1))
+        self.pending_pairs = 0
         return outputs
 
-    def close(self) -> dict:
+    def finish(self) -> list[np.ndarray]:
+        """End the input and return the generated frames of the pairs still pending."""
         if self.process.stdin:
             try:
                 self.process.stdin.close()
             except BrokenPipeError:
                 pass
+            self.process.stdin = None
+        outputs = self._read_frames(self.pending_pairs * (self.factor - 1)) if self.pending_pairs else []
+        self.pending_pairs = 0
+        return outputs
+
+    def close(self) -> dict:
+        """Finish the stream (discarding any pending output) and return the server's JSON summary."""
+        try:
+            self.finish()
+        except RuntimeError:
+            pass
         stderr = self.process.stderr.read().decode(errors="replace")
         self.process.wait()
         for pipe in (self.process.stdout, self.process.stderr):
