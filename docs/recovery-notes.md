@@ -267,10 +267,14 @@ bundle-specific NVIDIA comparison threshold.
 
 ## Roadmap
 
-1. Close exact PyTorch↔MLX and NVIDIA gates for the corrected 71-block graph before calling either implementation an oracle.
-2. Establish external NVIDIA golden parity across jitter, disocclusion, masking, and temporal history cases.
-3. Remove the remaining host boundaries with accelerator-resident texture input, guide generation, and final display output.
-4. Optimize the same checkpoint through MLXFast, Core ML, and fused Metal while continuously comparing against exact eager output.
-5. Package the source-only pluggable component, tests, video demo, and legal/publication boundary for community release.
+Done: the 71-block graph on MLX/Metal, PyTorch and Core ML with measured gates
+against the NVIDIA DLL; fused Metal kernels for attention and glue; video
+conversion with the temporal path; the frame generator on both backends,
+verified against the vendor's library; the web front end.
 
-The performance target is documented 1080p24 where hardware and model complexity permit it, with predictable lower-resolution, lower-cadence, or offline fallbacks where they do not.
+Open:
+
+1. NVIDIA golden parity for the temporal path across jitter, disocclusion, masking and history cases (Swift and Python agree with each other; the vendor's temporal output has not been captured).
+2. Accelerator-resident texture input, guide generation and display output for the neural renderer (frames still cross the host boundary per stage).
+3. Frame generation on Metal: a kernel running several layers per launch (the current floor is the latency of ~30 small dispatches, 6.5 ms at 960×540).
+4. Frame generation inputs the library has and video does not use: motion vectors, depth, HUD compositing, disocclusion inpainting.
