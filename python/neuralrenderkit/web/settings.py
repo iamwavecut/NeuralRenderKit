@@ -22,7 +22,7 @@ class Settings:
     device: str = "auto"          # torch device
     precision: str = "reference"  # torch precision for neural rendering (reference | fast ...)
     nrk_binary: str = ""          # explicit path to nrk (default: PATH or the repository build)
-    theme_dark: bool = True
+    theme_dark: bool = False
 
     @property
     def root_path(self) -> Path:

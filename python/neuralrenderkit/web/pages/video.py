@@ -4,18 +4,21 @@ from __future__ import annotations
 from nicegui import events, ui
 
 from ..state import get_state
-from .common import effect_editor, job_status_card, layout
+from .common import card, effect_editor, job_status_card, layout, page_heading
 
 
 @ui.page("/video")
 def video_page() -> None:
     state = get_state()
     with layout("Video"):
-        ui.label("Video").classes("text-2xl")
-        ui.label("Drop a clip, choose the effects and their order, run. Frame generation doubles/triples/quadruples the frame "
-                 "rate or slows the clip down; the preview shows original | result side by side.").classes("opacity-70")
+        page_heading("Video", "Drop a clip, choose the effects and their order, run. The preview shows original | result side by side.")
         upload_state: dict = {}
-        info = ui.label().classes("text-sm opacity-80")
+        with card():
+            ui.label("Input").classes("nrk-section")
+            with ui.column().classes("nrk-drop w-full"):
+                ui.upload(on_upload=lambda e: on_upload(e), auto_upload=True, label="drop a video here or click to choose",
+                          max_file_size=8_000_000_000).props("accept=video/* flat bordered").classes("w-full")
+            info = ui.label().classes("text-sm nrk-muted")
 
         async def on_upload(e: events.UploadEventArguments) -> None:
             target = state.settings.uploads / e.file.name
@@ -26,11 +29,10 @@ def video_page() -> None:
                 from ...video import probe
 
                 p = probe(target)
-                info.text = f"{e.file.name}: {p.width}x{p.height}, {p.fps:.3f} fps, {p.frame_count} frames, audio {'yes' if p.has_audio else 'no'}"
+                info.text = f"{e.file.name} · {p.width}×{p.height} · {p.fps:.3f} fps · {p.frame_count} frames · audio {'yes' if p.has_audio else 'no'}"
             except Exception as error:  # ffprobe missing or unreadable file
                 info.text = f"{e.file.name}: {error}"
 
-        ui.upload(on_upload=on_upload, auto_upload=True, label="video", max_file_size=8_000_000_000).props("accept=video/*").classes("w-full")
         chain = effect_editor("video")
         results = ui.column().classes("w-full gap-4")
 
@@ -49,13 +51,14 @@ def video_page() -> None:
                     finished = state.store.get(job.id)
                     if finished is None or finished.state != "done":
                         return
-                    with holder:
+                    with holder, card():
+                        ui.label("Result").classes("nrk-section")
                         if finished.preview:
-                            ui.video(f"/api/jobs/{job.id}/preview").classes("w-full rounded")
-                        with ui.row().classes("gap-4"):
-                            ui.link("download result", f"/api/jobs/{job.id}/download/0", new_tab=True)
-                            ui.label(f"{finished.seconds:.0f} s on {finished.backend}").classes("opacity-70 self-center")
+                            ui.video(f"/api/jobs/{job.id}/preview").classes("w-full rounded-xl")
+                        with ui.row().classes("items-center gap-4"):
+                            ui.button("Download", on_click=lambda: ui.navigate.to(f"/api/jobs/{job.id}/download/0", new_tab=True)).props("unelevated no-caps color=primary")
+                            ui.label(f"{finished.seconds:.0f} s · {finished.backend}").classes("text-sm nrk-muted")
 
                 job_status_card(job.id, on_done=show)
 
-        ui.button("Run", on_click=run).props("color=primary")
+        ui.button("Run", icon="play_arrow", on_click=run).props("unelevated no-caps color=primary size=lg").classes("self-start px-6")
