@@ -10,3 +10,6 @@ docs/handover/
 .lab/
 *.egg-info/
 python/build/
+
+# extracted proprietary weights (nrk-weights output), never committed
+weights/
