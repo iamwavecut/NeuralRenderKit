@@ -22,7 +22,7 @@ NVIDIA, and not a drop-in implementation of DLSS.
 
 Neural rendering on a 1408×1600 game render, 1:1 crop: input, defaults, `--processing-scale 2 --detail-strength 2`.
 
-[![Half-rate input, generated frames, withheld real frames](docs/assets/frame-generation-validate.png)](docs/assets/frame-generation-validate.mp4)
+https://github.com/user-attachments/assets/ce94f426-910b-4556-bdf9-662cbdd5933a
 
 Frame generation: even frames in, generated frames, the withheld odd frames (click for the video).
 
