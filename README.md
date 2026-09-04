@@ -94,7 +94,17 @@ nrk-video convert input.mp4 output.mp4 --weights ... --device cuda --batch 4 \
 nrk-video convert input.mp4 clip.mp4 --weights ... --start-frame 300 --frames 120 --decode-args "-vf scale=1280:-2"
 nrk-video probe input.mp4
 nrk-video compare input.mp4 output.mp4                    # original | processed side by side in mpv
+nrk-video framegen input.mp4 doubled.mp4 --weights framegen.safetensors               # DLSS frame generation: 2x frame rate
+nrk-video framegen input.mp4 slow.mp4 --weights framegen.safetensors --mode slowmo --factor 4 --audio stretch
 ```
+
+`framegen` runs the ported DLSS frame generator between every pair of frames
+(`--factor` 2, 3 or 4): `--mode fps` multiplies the frame rate and copies the
+audio, `--mode slowmo` keeps the rate and stretches the clip, with the audio
+stretched by FFmpeg's pitch-preserving `atempo` (`--audio stretch`), copied
+(`copy`, out of sync) or dropped (`none`). Its weights are the frame
+generation library's own, extracted with `nrk-weights extract-fg`; see
+[Frame generation](#frame-generation-ported).
 
 `--backend nrk` keeps decoding, motion estimation and encoding in Python and
 sends frames to the Swift runtime over pipes (`nrk stream`, about `4 fps` at
@@ -151,16 +161,15 @@ package tests alone.
 | Still images (`nrk render-image`, `nrk-torch run`) and raw tensors (`nrk run`) | Working |
 | Temporal reference (`nrk run-sequence`, Python `TemporalSession`) | Working; Swift and Python agree within `0.0014` MAE; end-to-end parity with NVIDIA's temporal path open |
 | Video conversion (`nrk-video`, FFmpeg decode/encode, audio copy) | Working; single-frame and temporal modes (optical-flow or engine motion, learned history blend) |
-| Frame generation | Being ported; measured on NVIDIA's library at 0.1–1.0 dB over ffmpeg `minterpolate` on video, about 1 ms per 1080p frame on the vendor's GPU; see [Research](#research-frame-generation-and-super-resolution) |
+| Frame generation (`nrk-video framegen`, Python `FrameGenerator`) | Working in PyTorch (CPU/CUDA/MPS); reproduces NVIDIA's library output at `59.9` dB PSNR on captured frames and to `0.01–0.03` dB on five whole clips; 13–20 ms per frame on an M2 Max; Metal port next; see [Research](#research-frame-generation-and-super-resolution) |
 | Super resolution | Measured and rejected: it needs engine motion vectors and matching jitter, and loses to Lanczos on realistic content |
 
 ## Research: frame generation and super resolution
 
-Neither belongs to this package today. Both were measured against NVIDIA's own
-libraries to decide what is worth the work, and the measurements are the reason
-one is on the roadmap and the other is not.
+Both were measured against NVIDIA's own libraries to decide what is worth the
+work, and the measurements are the reason one was ported and the other was not.
 
-### Frame generation: on the roadmap
+### Frame generation: ported
 
 [![Input at half rate, the reconstruction and the real frames](docs/assets/frame-generation-validate.png)](docs/assets/frame-generation-validate.mp4)
 
@@ -195,13 +204,40 @@ belongs.
 
 What that means for this package: NeuralRenderKit exists to run NVIDIA's
 networks on Apple Silicon, not to pick the best open interpolator, so frame
-generation is being ported on its own terms, and the table above is the honest
-expectation of what it will do to video. Where the port can stand out is the
-same place the vendor does — speed on the GPU it runs on. Two facts make the
-port tractable: motion vectors and depth turned out not to matter for video —
-zeroed, absurd and structured inputs all scored within 0.01 dB of real optical
-flow, so the input contract is two colour frames — and the vendor uses no
-fixed-function hardware block, so there is nothing that cannot run on Metal.
+generation was ported on its own terms, and the table above is the honest
+expectation of what it does to video. Two facts made the port tractable:
+motion vectors and depth turned out not to matter for video — zeroed, absurd
+and structured inputs all scored within 0.01 dB of real optical flow, so the
+input contract is two colour frames — and the vendor uses no fixed-function
+hardware block, so there is nothing that cannot run on Metal.
+
+**The port.** The generator was recovered from the library's own GPU kernels
+and memory snapshots of a live run: two convolutional synthesis networks (a
+coarse flow/mask/residual predictor and a refinement stage fed with the
+frames warped by the coarse flow, 1.4 M parameters together) and the
+compositing kernel that warps the two full-resolution frames by the refined
+flows and blends them through a sigmoid mask. Without motion vectors the
+library's whole motion-vector machinery — splatting, occlusion weights, the
+mask U-Net — collapses to constants, so the video path needs none of it. The
+Python port (`neuralrenderkit.FrameGenerator`) reproduces the library's output
+frame at **59.9 dB PSNR** (every pixel within 3/255) on the captured run and
+lands within 0.01–0.03 dB of the vendor column above on all five clips
+(27.39, 30.91, 33.49, 32.13, 38.92 dB). Any interpolation phase works, so
+`--factor 3` and `4` generate the same intermediate phases the vendor's
+multi-frame mode does. On an M2 Max through PyTorch/MPS a 960×540 frame takes
+5–6 ms of network time (17 ms at 1080p) — the Metal port of the same graph is
+the next step. Weights come from your own `libnvidia-ngx-dlssg.so` (DLSS SDK
+310.7.0), never from this repository:
+
+```bash
+nrk-weights extract-fg libnvidia-ngx-dlssg.so.310.7.0 framegen.safetensors
+nrk-video framegen input.mp4 doubled.mp4 --weights framegen.safetensors            # frame rate x2, audio copied
+nrk-video framegen input.mp4 slow.mp4 --weights framegen.safetensors --mode slowmo --factor 4 --audio stretch
+```
+
+Not ported, because video never exercises it: the motion-vector and depth
+inputs, the HUD-less/UI compositing and the disocclusion inpainting pass —
+all of them no-ops when the two frames are the only input.
 
 ### Super resolution: not worth porting
 
