@@ -61,39 +61,49 @@ def layout(title: str, lead: str | None = None):
         yield
 
 
-def effect_editor(kind: str) -> Callable[[], list[dict]]:
-    """Effect cards for ``kind`` (image | video); returns a getter for the ordered chain."""
+def effect_editor(kind: str, initial: list[dict] | None = None) -> Callable[[], list[dict]]:
+    """Effect cards for ``kind`` (image | video); returns a getter for the ordered chain.
+
+    ``initial`` (a job's effect list) preloads the controls, so a reopened result shows what produced it."""
     settings = get_state().settings
+    initial = initial or []
+    nr0 = next((e for e in initial if e.get("kind") == "nr"), None)
+    fg0 = next((e for e in initial if e.get("kind") == "fg"), None)
     with ds.card("Neural rendering") as box:
         with box.meta:
-            nr_enabled = ui.switch(value=True).props("dense color=primary")
+            nr_enabled = ui.switch(value=nr0 is not None or not initial).props("dense color=primary")
         if not settings.has_nr_weights():
             ui.label("Weights are not configured yet — add them in Settings.").classes("nrk-warn nrk-small")
-        with ui.element("div").classes("nrk-stack").bind_visibility_from(nr_enabled, "value"):
-            profile = ds.segmented_row("Profile", list(PROFILE_NAMES), value="standard")
-            scale = ds.slider_row("Processing scale", value=1.0, minimum=1.0, maximum=4.0, step=0.5, hint="Runs the network on the frame resampled by this factor; 2 is the photoreal setting.")
-            detail = ds.slider_row("Detail", value=1.0, minimum=0.0, maximum=4.0, step=0.1)
-            colour = ds.slider_row("Colour", value=1.0, minimum=0.0, maximum=4.0, step=0.1)
-            radius = ds.slider_row("Detail radius", value=4.0, minimum=1.0, maximum=16.0, step=0.5)
-            intensity = ds.slider_row("Intensity", value=1.0, minimum=0.0, maximum=2.0, step=0.1)
+        box.body.bind_visibility_from(nr_enabled, "value")
+        with ui.element("div").classes("nrk-stack"):
+            nr0 = nr0 or {}
+            profile = ds.segmented_row("Profile", list(PROFILE_NAMES), value=nr0.get("profile", "standard"))
+            scale = ds.slider_row("Processing scale", value=float(nr0.get("processing_scale", 1.0)), minimum=1.0, maximum=4.0, step=0.5, hint="Runs the network on the frame resampled by this factor; 2 is the photoreal setting.")
+            detail = ds.slider_row("Detail", value=float(nr0.get("detail_strength", 1.0)), minimum=0.0, maximum=4.0, step=0.1)
+            colour = ds.slider_row("Colour", value=float(nr0.get("colour_strength", 1.0)), minimum=0.0, maximum=4.0, step=0.1)
+            radius = ds.slider_row("Detail radius", value=float(nr0.get("detail_radius", 4.0)), minimum=1.0, maximum=16.0, step=0.5)
+            intensity = ds.slider_row("Intensity", value=float(nr0.get("intensity", 1.0)), minimum=0.0, maximum=2.0, step=0.1)
             temporal = None
             if kind == "video":
-                temporal = ds.switch_row("Temporal", "Reproject the previous output into the next frame and blend it (native scale only).", value=False)
+                temporal = ds.switch_row("Temporal", "Reproject the previous output into the next frame and blend it (native scale only).", value=bool(nr0.get("temporal", False)))
     fg_enabled = fg_mode = fg_factor = fg_audio = order = None
     if kind == "video":
         with ds.card("Frame generation") as box:
             with box.meta:
-                fg_enabled = ui.switch(value=False).props("dense color=primary")
+                fg_enabled = ui.switch(value=fg0 is not None).props("dense color=primary")
             if not settings.has_fg_weights():
                 ui.label("Weights are not configured yet — run nrk-weights extract-fg and add the file in Settings.").classes("nrk-warn nrk-small")
-            with ui.element("div").classes("nrk-stack").bind_visibility_from(fg_enabled, "value"):
-                fg_mode = ds.segmented_row("Mode", {"fps": "Higher frame rate", "slowmo": "Slow motion"}, value="fps",
+            box.body.bind_visibility_from(fg_enabled, "value")
+            with ui.element("div").classes("nrk-stack"):
+                fg0 = fg0 or {}
+                fg_mode = ds.segmented_row("Mode", {"fps": "Higher frame rate", "slowmo": "Slow motion"}, value=fg0.get("mode", "fps"),
                                            hint="Higher frame rate keeps the duration; slow motion keeps the rate and stretches the clip.")
-                fg_factor = ds.segmented_row("Factor", {2: "×2", 3: "×3", 4: "×4"}, value=2)
-                fg_audio = ds.segmented_row("Audio", {"copy": "Copy", "stretch": "Stretch", "none": "Drop"}, value="copy",
+                fg_factor = ds.segmented_row("Factor", {2: "×2", 3: "×3", 4: "×4"}, value=int(fg0.get("factor", 2)))
+                fg_audio = ds.segmented_row("Audio", {"copy": "Copy", "stretch": "Stretch", "none": "Drop"}, value=fg0.get("audio", "copy"),
                                             hint="Stretch keeps the pitch and only applies to slow motion.")
         with ds.card("Order"):
-            order = ds.segmented_row("When both are on", {"nr_first": "Render → generate", "fg_first": "Generate → render"}, value="nr_first",
+            first = initial[0].get("kind") if initial else "nr"
+            order = ds.segmented_row("When both are on", {"nr_first": "Render → generate", "fg_first": "Generate → render"}, value="fg_first" if first == "fg" else "nr_first",
                                      hint="Generating first sends every frame, including generated ones, through the renderer.")
 
     def chain() -> list[dict]:

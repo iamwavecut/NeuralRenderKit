@@ -8,10 +8,30 @@ from . import ds
 from .common import effect_editor, job_status_card, layout
 
 
+def result_card(job) -> None:
+    """The converted clip; the side-by-side comparison with the original is a view, not the product."""
+    result_url = f"/api/jobs/{job.id}/output/0"
+    with ds.card("Result") as box:
+        with box.meta:
+            if job.preview:
+                view = ui.toggle({"result": "Result", "compare": "Side by side"}, value="result").props("unelevated no-caps dense toggle-color=primary").classes("nrk-seg")
+            ds.result_meta(job)
+        player = ui.video(result_url).classes("nrk-preview")
+        note = ui.label(f"{job.input_name} → {job.outputs[0]}").classes("nrk-muted nrk-small")
+        if job.preview:
+            def switch() -> None:
+                compare = view.value == "compare"
+                player.set_source(f"/api/jobs/{job.id}/preview" if compare else result_url)
+                note.set_text("Original on the left, result on the right; the first 12 seconds." if compare else f"{job.input_name} → {job.outputs[0]}")
+
+            view.on_value_change(lambda _e: switch())
+
+
 @ui.page("/video")
-def video_page() -> None:
+def video_page(job: str | None = None) -> None:
+    """``?job=ID`` opens a finished job's side-by-side preview."""
     state = get_state()
-    with layout("Video", "Run a clip through the neural renderer, the frame generator, or both, and preview the result next to the original."):
+    with layout("Video", "Run a clip through the neural renderer, the frame generator, or both; the result plays here, with the original beside it on request."):
         upload_state: dict = {}
         with ui.element("div").classes("nrk-grid"):
             with ui.element("div").classes("nrk-stack"):
@@ -20,8 +40,12 @@ def video_page() -> None:
                                        on_upload=lambda e: on_upload(e), max_size=8_000_000_000)
                     picked = ui.element("div").classes("w-full").style("display: none")
                 results = ui.element("div").classes("nrk-stack")
+                opened = state.store.get(job) if job else None
+                if opened is not None and opened.state == "done" and opened.outputs:
+                    with results:
+                        result_card(opened)
             with ui.element("div").classes("nrk-stack"):
-                chain = effect_editor("video")
+                chain = effect_editor("video", opened.effects if opened is not None else None)
                 ds.button("Run", kind="primary", icon="play_arrow", large=True, on_click=lambda: run())
 
         async def on_upload(e: events.UploadEventArguments) -> None:
@@ -59,12 +83,6 @@ def video_page() -> None:
                     if finished is None or finished.state != "done":
                         return
                     with holder:
-                        with ds.card("Result") as box:
-                            with box.meta:
-                                ui.label(f"{finished.seconds:.0f} s · {finished.backend}").classes("nrk-muted nrk-small nrk-mono")
-                                ds.button("Download", kind="secondary", icon="download", on_click=lambda: ui.navigate.to(f"/api/jobs/{job.id}/download/0", new_tab=True))
-                            if finished.preview:
-                                ui.video(f"/api/jobs/{job.id}/preview").classes("nrk-preview")
-                                ui.label("Original on the left, result on the right; the first 12 seconds.").classes("nrk-muted nrk-small")
+                        result_card(finished)
 
                 job_status_card(job.id, on_done=show)

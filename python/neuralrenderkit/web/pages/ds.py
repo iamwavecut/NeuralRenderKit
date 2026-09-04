@@ -62,6 +62,7 @@ html, body { background: var(--bg) !important; color: var(--text); font-family: 
 .nrk-card-title { font-size: 13px; font-weight: 600; letter-spacing: 0.02em; }
 .nrk-card-body { padding: 20px; display: flex; flex-direction: column; gap: 16px; }
 .nrk-card-body.tight { padding: 0; gap: 0; }
+.nrk-card-head:has(+ .nrk-card-body.hidden) { border-bottom: 0; }   /* a switched-off effect card is just its header */
 
 /* text */
 .nrk-muted { color: var(--muted); }
@@ -181,7 +182,8 @@ def card(title: str | None = None, *, tight: bool = False):
             with ui.element("div").classes("nrk-card-head"):
                 ui.label(title).classes("nrk-card-title")
                 box.meta = ui.element("div").classes("flex items-center gap-2")  # type: ignore[attr-defined]
-        with ui.element("div").classes("nrk-card-body" + (" tight" if tight else "")):
+        box.body = ui.element("div").classes("nrk-card-body" + (" tight" if tight else ""))
+        with box.body:
             yield box
 
 
@@ -259,7 +261,7 @@ def dropzone(*, accept: str, title: str, hint: str, on_upload: Callable[[events.
 def file_row(name: str, meta: str, *, thumbnail: str | None = None) -> None:
     with ui.element("div").classes("nrk-file"):
         if thumbnail:
-            ui.image(thumbnail)
+            ui.html(f'<img src="{thumbnail}" alt="">')
         else:
             ui.icon("videocam").classes("text-2xl").style("color: var(--accent)")
         with ui.element("div").classes("min-w-0"):
@@ -271,6 +273,12 @@ def empty_state(icon: str, text: str) -> None:
     with ui.element("div").classes("nrk-empty"):
         ui.icon(icon)
         ui.label(text)
+
+
+def result_meta(job) -> None:
+    """Right-side header of a result card: time, backend, download."""
+    ui.label(f"{job.seconds:.1f} s · {job.backend}").classes("nrk-muted nrk-small nrk-mono")
+    button("Download", kind="secondary", icon="download", on_click=lambda: ui.navigate.to(f"/api/jobs/{job.id}/download/0", new_tab=True))
 
 
 def wipe_compare(before_url: str, after_url: str) -> None:

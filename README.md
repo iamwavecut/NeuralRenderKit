@@ -106,12 +106,27 @@ nrk-web        # http://127.0.0.1:8181; --port, --no-browser, --native (pywebvie
 ```
 
 Pages: Image (before/after slider), Video (effect chain: neural rendering and
-frame generation in either order, side-by-side preview), Jobs (queue, progress,
+frame generation in either order; the result plays in place, a side-by-side
+comparison with the original is one click away), Jobs (queue, progress,
 cancel, downloads), Settings (weight paths, backend, device, theme). Jobs run
 one at a time; results are stored under `~/NeuralRenderKit/outputs/<job>/`.
 HTTP API: `GET /api/effects`, `POST /api/jobs` (multipart `file` + JSON
 `effects`), `GET /api/jobs[/{id}]`, `POST /api/jobs/{id}/cancel`,
-`GET /api/jobs/{id}/preview`, `GET /api/jobs/{id}/download/{n}`.
+`GET /api/jobs/{id}/output/{n}` (inline), `GET /api/jobs/{id}/download/{n}`,
+`GET /api/jobs/{id}/preview` (side by side).
+
+<p>
+  <a href="docs/assets/web-image.png"><img src="docs/assets/web-image.png" width="49%" alt="Image page: a 1280×1440 face crop rendered at processing scale 2, detail 2, with the before/after wipe"></a>
+  <a href="docs/assets/web-video.png"><img src="docs/assets/web-video.png" width="49%" alt="Video page: the effect chain and the converted clip playing in place"></a>
+</p>
+<p>
+  <a href="docs/assets/web-jobs.png"><img src="docs/assets/web-jobs.png" width="100%" alt="Jobs page: the queue with results, downloads and the side-by-side comparison"></a>
+</p>
+
+Image: a 1280×1440 face crop rendered on Metal in 4.6 s at processing scale 2,
+detail 2; drag the divider. Video: the converted clip plays in place, «Side by
+side» shows it next to the original. Jobs: every result with its download,
+the comparison clip and the folder.
 
 ## Controls (neural rendering)
 

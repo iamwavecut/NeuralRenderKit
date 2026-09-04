@@ -49,10 +49,13 @@ def jobs_page() -> None:
                         with ui.element("div").classes("nrk-actions"):
                             if job.state in ("queued", "running"):
                                 ds.button("Cancel", kind="danger", on_click=lambda j=job: (state.queue.cancel(j.id), rows.refresh()))
+                            if job.state == "done" and job.outputs:
+                                page = "/video" if job.preview or job.outputs[0].endswith((".mp4", ".mov", ".mkv", ".webm")) else "/"
+                                ds.icon_button("compare", tooltip="Open the result", on_click=lambda j=job, p=page: ui.navigate.to(f"{p}?job={j.id}"))
                             for i, name in enumerate(job.outputs):
                                 ds.icon_button("download", tooltip=f"Download {name}", on_click=lambda j=job, i=i: ui.navigate.to(f"/api/jobs/{j.id}/download/{i}", new_tab=True))
                             if job.preview:
-                                ds.icon_button("play_circle", tooltip="Open the side-by-side preview", on_click=lambda j=job: ui.navigate.to(f"/api/jobs/{j.id}/preview", new_tab=True))
+                                ds.icon_button("compare_arrows", tooltip="Side-by-side comparison with the original (first 12 s)", on_click=lambda j=job: ui.navigate.to(f"/api/jobs/{j.id}/preview", new_tab=True))
                             ds.icon_button("folder_open", tooltip="Show the job folder", on_click=lambda j=job: ui.notify(str(state.store.folder(j.id))))
                             if job.state in ("done", "failed", "cancelled"):
                                 ds.icon_button("delete_outline", tooltip="Delete the job and its files", danger=True, on_click=lambda j=job: (state.store.delete(j.id), rows.refresh()))

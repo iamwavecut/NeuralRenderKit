@@ -11,8 +11,16 @@ from . import ds
 from .common import effect_editor, job_status_card, layout
 
 
+def result_card(job) -> None:
+    with ds.card("Result") as box:
+        with box.meta:
+            ds.result_meta(job)
+        ds.wipe_compare(f"/api/jobs/{job.id}/input", f"/api/jobs/{job.id}/download/0")
+
+
 @ui.page("/")
-def image_page() -> None:
+def image_page(job: str | None = None) -> None:
+    """``?job=ID`` opens a finished job's before/after comparison."""
     state = get_state()
     with layout("Image", "Enhance a still with the neural renderer, then compare before and after."):
         upload_state: dict = {}
@@ -23,8 +31,12 @@ def image_page() -> None:
                                        on_upload=lambda e: on_upload(e), max_size=200_000_000)
                     picked = ui.element("div").classes("w-full").style("display: none")
                 results = ui.element("div").classes("nrk-stack")
+                opened = state.store.get(job) if job else None
+                if opened is not None and opened.state == "done" and opened.outputs:
+                    with results:
+                        result_card(opened)
             with ui.element("div").classes("nrk-stack"):
-                chain = effect_editor("image")
+                chain = effect_editor("image", opened.effects if opened is not None else None)
                 run_button = ds.button("Run", kind="primary", icon="play_arrow", large=True, on_click=lambda: run())
 
         async def on_upload(e: events.UploadEventArguments) -> None:
@@ -61,10 +73,6 @@ def image_page() -> None:
                     if finished is None or finished.state != "done":
                         return
                     with holder:
-                        with ds.card("Result") as box:
-                            with box.meta:
-                                ui.label(f"{finished.seconds:.1f} s · {finished.backend}").classes("nrk-muted nrk-small nrk-mono")
-                                ds.button("Download", kind="secondary", icon="download", on_click=lambda: ui.navigate.to(f"/api/jobs/{job.id}/download/0", new_tab=True))
-                            ds.wipe_compare(f"/api/jobs/{job.id}/input", f"/api/jobs/{job.id}/download/0")
+                        result_card(finished)
 
                 job_status_card(job.id, on_done=show)

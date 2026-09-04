@@ -75,6 +75,24 @@ class JobRunner:
         from PIL import Image
 
         nr = next(e for e in effects if isinstance(e, NeuralRender))
+        out = folder / "result.png"
+        if settings.resolved_backend("nr") == "nrk":
+            # Metal: the whole frame stays on the GPU; the PyTorch graph below keeps the
+            # activations of the entire frame in memory and needs tens of GB at 4K.
+            from ..nrk_stream import find_nrk
+
+            if not settings.nr_model:
+                raise ValueError("set the .nrkmodel package for the Metal backend in Settings")
+            report("neural rendering", 0.2, 0, 1)
+            command = [find_nrk(settings.nrk_binary or None), "render-image", str(source), str(Path(settings.nr_model).expanduser()),
+                       "--output", str(out), "--execution", "metal-fused", "--precision", "float16", "--profile", nr.profile,
+                       "--processing-scale", f"{nr.processing_scale:g}", "--detail-strength", f"{nr.detail_strength:g}",
+                       "--colour-strength", f"{nr.colour_strength:g}", "--detail-radius", f"{nr.detail_radius:g}", "--intensity", f"{nr.intensity:g}"]
+            completed = subprocess.run(command, capture_output=True, text=True)
+            if completed.returncode != 0:
+                raise RuntimeError(f"nrk render-image failed: {completed.stderr.strip()[-500:]}")
+            report("done", 1.0, 1, 1)
+            return out
         if not settings.nr_weights:
             raise ValueError("set the neural rendering weights (logical safetensors) in Settings")
         report("loading the network", 0.05, 0, None)
@@ -85,7 +103,6 @@ class JobRunner:
             image, profile=nr.profile, processing_scale=nr.processing_scale, detail_strength=nr.detail_strength,
             colour_strength=nr.colour_strength, detail_radius=nr.detail_radius, intensity=nr.intensity,
         )
-        out = folder / "result.png"
         Image.fromarray((np.clip(result.image, 0, 1) * 255 + 0.5).astype(np.uint8)).save(out)
         report("done", 1.0, 1, 1)
         return out

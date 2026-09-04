@@ -80,6 +80,14 @@ def build_router(state: WebState) -> APIRouter:
             raise HTTPException(404, "no preview")
         return FileResponse(state.store.folder(job_id) / j.preview)
 
+    @router.get("/jobs/{job_id}/output/{index}")
+    def output(job_id: str, index: int) -> FileResponse:
+        """An output served inline (for the page's players), unlike ``download``."""
+        j = state.store.get(job_id)
+        if j is None or index < 0 or index >= len(j.outputs):
+            raise HTTPException(404, "no such output")
+        return FileResponse(state.store.folder(job_id) / j.outputs[index])
+
     @router.get("/jobs/{job_id}/download/{index}")
     def download(job_id: str, index: int) -> FileResponse:
         j = state.store.get(job_id)
