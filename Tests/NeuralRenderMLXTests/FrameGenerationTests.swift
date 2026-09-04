@@ -174,3 +174,111 @@ private struct SplitMix {
     return (-2 * log(u1)).squareRoot() * cos(2 * .pi * u2)
   }
 }
+
+final class FrameGenerationFusedConvTests: XCTestCase {
+  private func random(_ shape: [Int], seed: UInt64, scale: Float = 1) -> MLXArray {
+    var s = seed &+ 0x9E37_79B9_7F4A_7C15
+    func next() -> Float {
+      s &+= 0x9E37_79B9_7F4A_7C15
+      var z = s; z = (z ^ (z >> 30)) &* 0xBF58_476D_1CE4_E5B9; z = (z ^ (z >> 27)) &* 0x94D0_49BB_1331_11EB; z ^= z >> 31
+      return (Float(z >> 40) / Float(1 << 24) - 0.5) * 2 * scale
+    }
+    let count = shape.reduce(1, *)
+    return MLXArray((0..<count).map { _ in next() }, shape)
+  }
+
+  private func reference(_ x: MLXArray, _ w: MLXArray, _ b: MLXArray, activation: Bool, residual: MLXArray?, pool: Bool) -> MLXArray {
+    var y = conv2d(x, w.transposed(0, 2, 3, 1), stride: 1, padding: 1) + b
+    if activation { y = clip(leakyRelu(y, negativeSlope: 0.01), min: -6, max: 6) }
+    if let residual { y = y + residual }
+    if pool { y = FrameGenerator.meanPool2(y) }
+    return y
+  }
+
+  func testFusedConvMatchesMLXForEveryEpilogue() {
+    for (cin, cout, h, w) in [(16, 32, 12, 20), (32, 32, 10, 14), (64, 64, 6, 8), (18, 16, 8, 12)] {
+      let x = random([1, h, w, cin], seed: 1)
+      let weight = random([cout, cin, 3, 3], seed: 2, scale: 0.2)
+      let bias = random([cout], seed: 3, scale: 0.5)
+      let layer = FrameGenerationFusedConv.Layer(weight: weight, bias: bias)
+      let xp = padded(x, widths: [[0, 0], [0, 0], [0, 0], [0, layer.cin - cin]]).asType(.float16)
+      for (activation, useResidual, pool) in [(true, false, false), (false, false, false), (true, true, false), (true, false, true)] {
+        let residual = useResidual ? random([1, h, w, cout], seed: 4) : nil
+        let got = FrameGenerationFusedConv.apply(xp, layer, activation: activation, residual: residual?.asType(.float16), pool: pool).asType(.float32)
+        let want = reference(x, weight, bias, activation: activation, residual: residual, pool: pool)
+        XCTAssertEqual(got.shape, want.shape)
+        let diff = abs(got - want).max().item(Float.self)
+        let scale = abs(want).max().item(Float.self)
+        XCTAssertLessThan(diff, 0.02 * max(scale, 1), "cin \(cin) cout \(cout) act \(activation) res \(useResidual) pool \(pool): max diff \(diff) of \(scale)")
+      }
+    }
+  }
+}
+
+final class FrameGenerationSimdConvTests: XCTestCase {
+  func testSimdgroupConvMatchesPerPixelKernel() {
+    var s: UInt64 = 7
+    func next() -> Float {
+      s &+= 0x9E37_79B9_7F4A_7C15
+      var z = s; z = (z ^ (z >> 30)) &* 0xBF58_476D_1CE4_E5B9; z = (z ^ (z >> 27)) &* 0x94D0_49BB_1331_11EB; z ^= z >> 31
+      return Float(z >> 40) / Float(1 << 24) - 0.5
+    }
+    func random(_ shape: [Int], scale: Float) -> MLXArray { MLXArray((0..<shape.reduce(1, *)).map { _ in next() * scale }, shape) }
+    for (cin, cout, h, w) in [(16, 32, 9, 21), (32, 32, 12, 20), (64, 64, 7, 60), (24, 16, 5, 33), (32, 96, 6, 18)] {
+      let x = random([1, h, w, cin], scale: 2).asType(.float16)
+      let layer = FrameGenerationFusedConv.Layer(weight: random([cout, cin, 3, 3], scale: 0.3), bias: random([cout], scale: 1))
+      for (activation, useResidual) in [(true, false), (false, false), (true, true)] {
+        let residual = useResidual ? random([1, h, w, cout], scale: 1).asType(.float16) : nil
+        let want = FrameGenerationFusedConv.apply(x, layer, activation: activation, residual: residual, pool: false)
+        FrameGenerationFusedConv.simdEnabled = false
+        let reference = FrameGenerationFusedConv.apply(x, layer, activation: activation, residual: residual, pool: false)
+        FrameGenerationFusedConv.simdEnabled = true
+        let got = FrameGenerationFusedConv.applySimd(x, layer, activation: activation, residual: residual)
+        XCTAssertEqual(got.shape, reference.shape)
+        let diff = abs(got.asType(.float32) - reference.asType(.float32)).max().item(Float.self)
+        let scale = abs(reference.asType(.float32)).max().item(Float.self)
+        XCTAssertLessThan(diff, 0.02 * max(scale, 1), "cin \(cin) cout \(cout) \(h)x\(w) act \(activation) res \(useResidual): max diff \(diff) of \(scale)")
+        _ = want
+      }
+    }
+  }
+}
+
+final class FrameGenerationFusedInputTests: XCTestCase {
+  private func random(_ shape: [Int], seed: UInt64) -> MLXArray {
+    var s = seed &+ 0x9E37_79B9_7F4A_7C15
+    return MLXArray((0..<shape.reduce(1, *)).map { _ -> Float in
+      s &+= 0x9E37_79B9_7F4A_7C15
+      var z = s; z = (z ^ (z >> 30)) &* 0xBF58_476D_1CE4_E5B9; z = (z ^ (z >> 27)) &* 0x94D0_49BB_1331_11EB; z ^= z >> 31
+      return Float(z >> 40) / Float(1 << 24)
+    }, shape)
+  }
+
+  func testBlock0InputKernelMatchesOperations() {
+    let a = random([1, 38, 44, 3], seed: 1), b = random([1, 38, 44, 3], seed: 2)
+    let phase = MLXArray(Float(0.25))
+    let got = FrameGenerator.block0Input(a, b, phase: phase).asType(.float32)
+    let pa = FrameGenerator.box2(a), pb = FrameGenerator.box2(b)
+    let err = FrameGenerator.photometricError(pa, pb)
+    let zero = MLXArray.zeros(err.shape), t = MLX.full(err.shape, values: phase)
+    let want = concatenated([pa, err, pb, err, zero, t, MLXArray.zeros([1, err.dim(1), err.dim(2), 6])], axis: 3)
+    XCTAssertEqual(got.shape, want.shape)
+    XCTAssertLessThan(abs(got - want).max().item(Float.self), 2e-3)
+  }
+
+  func testBlock1InputKernelMatchesOperations() {
+    let cand = random([1, 16, 32, 16], seed: 3)
+    let coarse = (random([1, 8, 16, 8], seed: 4) - 0.5) * 4
+    let phase = MLXArray(Float(0.5))
+    let got = FrameGenerator.block1Input(cand.asType(.float16), coarse: coarse.asType(.float16), phase: phase).asType(.float32)
+    let up = FrameGenerator.upsample2(coarse)
+    let f0 = up[0..., 0..., 0..., 0..<4]
+    let candA = cand[0..., 0..., 0..., 0..<4], candB = cand[0..., 0..., 0..., 4..<8]
+    let warpedA = FrameGenerator.warp(candA, flow: f0[0..., 0..., 0..., 0..<2] * 2)
+    let warpedB = FrameGenerator.warp(candB, flow: f0[0..., 0..., 0..., 2..<4] * 2)
+    let zero = MLXArray.zeros([1, 16, 32, 1]), t = MLX.full([1, 16, 32, 1], values: phase)
+    let want = concatenated([warpedA, warpedB, f0, up[0..., 0..., 0..., 4..<5], zero, up[0..., 0..., 0..., 5..<8], t, MLXArray.zeros([1, 16, 32, 6])], axis: 3)
+    XCTAssertEqual(got.shape, want.shape)
+    XCTAssertLessThan(abs(got - want).max().item(Float.self), 1e-2)
+  }
+}

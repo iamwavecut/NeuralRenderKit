@@ -71,6 +71,53 @@ enum FrameGenCommand {
     let clock = ContinuousClock()
     var outputs: [String] = []
     var seconds = 0.0
+    if repeatCount > 1, ProcessInfo.processInfo.environment["NRK_FG_BENCH_STAGES"] == "1" {
+      // stage timing: synthesis alone, then the composition alone, after a warm-up
+      let export = generator.synthesize(aArray, bArray, phase: phases[0]); eval(export)
+      var t0 = clock.now
+      for _ in 0..<repeatCount { eval(generator.synthesize(aArray, bArray, phase: phases[0])) }
+      var d = t0.duration(to: clock.now)
+      let synth = (Double(d.components.seconds) + Double(d.components.attoseconds) / 1e18) / Double(repeatCount)
+      let coarse = concatenated([export[0..., 0..., 0..., 0..<4], sigmoid(export[0..., 0..., 0..., 4..<5])], axis: 3).asType(.float32)
+      let a32 = aArray.asType(.float32), b32 = bArray.asType(.float32); eval(coarse, a32, b32)
+      t0 = clock.now
+      for _ in 0..<repeatCount { eval(FrameGenerator.compose(a32, b32, coarse: coarse)) }
+      d = t0.duration(to: clock.now)
+      let comp = (Double(d.components.seconds) + Double(d.components.attoseconds) / 1e18) / Double(repeatCount)
+      FileHandle.standardError.write(Data(String(format: "stages: synthesize %.2f ms, compose %.2f ms\n", synth * 1000, comp * 1000).utf8))
+      // per-op overhead probe: chains of tiny kernels
+      do {
+        var x = MLXArray.zeros([1, 16, 16, 8], dtype: .float16)
+        eval(x)
+        for (name, op) in [("mlx add", { (v: MLXArray) -> MLXArray in v + 1 }),
+                           ("custom up2+pool", { (v: MLXArray) -> MLXArray in FrameGenerator.meanPool2(FrameGenerator.upsample2(v)) }),
+                           ("mlx conv 8->8", { (v: MLXArray) -> MLXArray in conv2d(v, MLXArray.zeros([8, 3, 3, 8], dtype: .float16), stride: 1, padding: 1) })] {
+          var y = x
+          for _ in 0..<20 { y = op(y) }
+          eval(y)
+          let p0 = clock.now
+          for _ in 0..<5 {
+            y = x
+            for _ in 0..<100 { y = op(y) }
+            eval(y)
+          }
+          let dp = p0.duration(to: clock.now)
+          let perOp = (Double(dp.components.seconds) + Double(dp.components.attoseconds) / 1e18) / 500 * 1e6
+          FileHandle.standardError.write(Data(String(format: "  probe %@: %.1f us per op\n", name as NSString, perOp).utf8))
+        }
+        x = x + 0
+      }
+      var previous = 0.0
+      for stage in 0...3 {
+        eval(generator.synthesizeUpTo(stage, aArray, bArray, phase: phases[0]))
+        let s0 = clock.now
+        for _ in 0..<repeatCount { eval(generator.synthesizeUpTo(stage, aArray, bArray, phase: phases[0])) }
+        let ds = s0.duration(to: clock.now)
+        let ms = (Double(ds.components.seconds) + Double(ds.components.attoseconds) / 1e18) / Double(repeatCount) * 1000
+        FileHandle.standardError.write(Data(String(format: "  up to stage %d: %.2f ms (+%.2f)\n", stage, ms, ms - previous).utf8))
+        previous = ms
+      }
+    }
     for (k, value) in phases.enumerated() {
       if repeatCount > 1 { _ = try generator.interpolate(aArray, bArray, phase: value) }  // warm-up: kernel compilation
       let started = clock.now

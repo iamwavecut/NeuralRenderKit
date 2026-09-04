@@ -66,19 +66,24 @@ Per generated frame on an M2 Max, after warm-up:
 
 | | 960×540 | 1920×1080 |
 | --- | --- | --- |
-| Metal (Swift/MLX, float16, compiled graph) | 7.5 ms | 26 ms |
-| Metal (float32) | 9.2 ms | 32 ms |
+| Metal (Swift/MLX, float16) | 6.5 ms | 19.5 ms |
+| Metal (float32, MLX convolutions) | 9.2 ms | 32 ms |
 | PyTorch / MPS (float16) | 5.3 ms | 17 ms |
 | PyTorch / MPS (float32) | 6.3 ms | 22 ms |
 
-The Swift port (`nrk framegen`, `nrk framegen-stream`) keeps the convolutions
-in MLX and implements the bilinear ×2 upsample, the candidate warp and the
-output composition as custom Metal kernels; compiling the graph removed the
-per-operation overhead of the eager path (17.8 ms → 7.5 ms at 540p). What
-remains is the convolutions themselves: the synthesis networks run at 240×136
-and below with 16–64 channels, where MLX's convolution kernels trail the tuned
-MPS ones that PyTorch uses. Accuracy is unaffected: the two ports agree within
-`4e-8` MAE at float32 and `7e-6` at float16 on real weights.
+The Swift port (`nrk framegen`, `nrk framegen-stream`) runs each convolution
+as one Metal kernel with the bias, the clamped LeakyReLU, the residual add and
+the 2×2 mean pool in its epilogue (the three heads as one convolution, the
+linear head as a block-diagonal one), assembles each block's input with a
+single kernel (box means, blurred error, upsampled flows, warps) and composes
+the output with another. Going from the eager MLX graph to this took 540p from
+17.8 ms to 6.5 ms. What remains is not arithmetic: at these sizes (240×136 and
+below, 16–64 channels) every layer costs 150–250 µs whether it is MLX's
+convolution, a per-pixel kernel or a `simdgroup_matrix` kernel, so the floor is
+the latency of a chain of some thirty small GPU dispatches; PyTorch/MPS sits at
+the same floor a little lower. The next step would be a kernel that runs several
+layers per launch. Accuracy is unaffected: the two ports agree within `1e-7`
+MAE at float32 and `1.3e-5` at float16 on real weights (a full 960×540 frame).
 
 ## Not ported
 

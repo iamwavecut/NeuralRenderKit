@@ -243,14 +243,14 @@ frame at **59.9 dB PSNR** (every pixel within 3/255) on the captured run and
 lands within 0.01–0.03 dB of the vendor column above on all five clips
 (27.39, 30.91, 33.49, 32.13, 38.92 dB). Any interpolation phase works, so
 `--factor 3` and `4` generate the same intermediate phases the vendor's
-multi-frame mode does. The same graph runs on Metal through Swift/MLX (the
-convolutions in MLX, the warps and the output composition as custom kernels,
-the whole graph compiled), matching the PyTorch port within `7e-6` MAE at
-float16. On an M2 Max a 960×540 frame takes 7.5 ms on Metal and 5.3 ms through
-PyTorch/MPS (26 ms and 17 ms at 1080p) — real time either way, and Apple's
-tuned convolutions behind MPS still beat MLX's on these small layers. Weights
-come from your own `libnvidia-ngx-dlssg.so` (DLSS SDK 310.7.0), never from this
-repository:
+multi-frame mode does. The same graph runs on Metal through Swift/MLX with
+custom kernels for every stage (one launch per convolution with its epilogue,
+one per block input, one for the output), matching the PyTorch port within
+`1.3e-5` MAE at float16. On an M2 Max a 960×540 frame takes 6.5 ms on Metal
+and 5.3 ms through PyTorch/MPS (19.5 ms and 17 ms at 1080p) — real time either
+way; both sit on the latency floor of a chain of thirty small GPU dispatches
+rather than on arithmetic. Weights come from your own `libnvidia-ngx-dlssg.so`
+(DLSS SDK 310.7.0), never from this repository:
 
 ```bash
 nrk-weights extract-fg libnvidia-ngx-dlssg.so.310.7.0 framegen.safetensors
