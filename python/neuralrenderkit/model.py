@@ -47,8 +47,10 @@ def recovered_window_origin(block_index: int) -> tuple[int, int]:
 # evaluated in chunks of at most this many tokens, so the temporaries of a
 # block scale with the chunk and not with the frame: a 2560x2880 frame at
 # block 0 otherwise materialises 28k windows of 256x256 scores at once (tens of
-# GB). Chunking changes no arithmetic; every token and window sees the same
-# operations. ``NRK_TORCH_CHUNK_TOKENS=0`` disables it.
+# GB). Every token and window sees the same operations; a BLAS may still round
+# a GEMM differently for a different row count, which the E4M3 publish turns
+# into rare one-quantum flips (max 2e-4 on the output in the tests).
+# ``NRK_TORCH_CHUNK_TOKENS=0`` disables it.
 CHUNK_TOKENS = int(os.environ.get("NRK_TORCH_CHUNK_TOKENS", str(1 << 18)))
 
 

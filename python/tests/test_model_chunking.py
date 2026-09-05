@@ -26,8 +26,12 @@ class ChunkedEvaluationTests(unittest.TestCase):
         finally:
             model_module.CHUNK_TOKENS = saved
         self.assertEqual(whole.shape, chunked.shape)
-        difference = (whole - chunked).abs().max().item()
-        self.assertLess(difference, 1e-6, f"chunked evaluation differs by {difference}")
+        # Every token and window sees the same operations, but a BLAS may round a
+        # GEMM differently for a different row count (macOS runners do, Linux and
+        # Windows do not); the E4M3 publish then flips a few values by one quantum.
+        difference = (whole - chunked).abs()
+        self.assertLess(difference.max().item(), 2e-3, f"chunked evaluation differs by {difference.max().item()}")
+        self.assertLess(difference.mean().item(), 2e-6, f"chunked evaluation differs on average by {difference.mean().item()}")
 
     def test_per_token_handles_ragged_chunks(self):
         saved = model_module.CHUNK_TOKENS
