@@ -7,16 +7,27 @@
 > experiments like this one, and the pet projects queued behind it. Hit me up on
 > X: [@WaveCut](https://x.com/WaveCut).
 
-Runtime for two networks recovered from NVIDIA's DLSS libraries: the
-neural-rendering transformer (detail, colour, tone) and the frame generator
-(interpolated frames for video). Swift package and `mlxdlss` CLI for Apple Silicon
-(MLX/Metal, Core ML), Python package for every platform (PyTorch inference,
-weight tooling, video conversion, web front end). Weights come from your own
-copies of `nvngx_dlssnr.dll` and `libnvidia-ngx-dlssg.so`; nothing proprietary
-is included, downloaded or redistributed.
+**What this is.** NVIDIA ships two neural networks inside DLSS: the DLSS 5
+neural renderer, which makes game frames look more photoreal (detail, colour,
+tone), and the frame generator, which interpolates frames. Both are locked to
+RTX cards and to games that call DLSS. This project runs them anywhere else:
+on stills and video, on Apple Silicon first (MLX and Metal), on any machine
+through PyTorch, and as a Core ML export.
 
-MLX-DLSS is independent software, not affiliated with or endorsed by
-NVIDIA, and not a drop-in implementation of DLSS.
+**How it was done.** The networks were recovered from the libraries by reading
+their kernels and comparing every intermediate tensor against captures from
+the real thing. The neural renderer lands within 0.005 MAE of the DLL on game
+renders; the frame generator matches the library at 59.9 dB. Half of the work
+was not the math but the rounding: FP8, half floats, an approximate softmax
+and a hash-based noise generator all had to be reproduced bit for bit.
+
+**What you need.** Your own copies of `nvngx_dlssnr.dll` and
+`libnvidia-ngx-dlssg.so`; the weight tool extracts the tensors locally.
+Nothing proprietary is included, downloaded or redistributed.
+
+**What it is not.** Not real-time in games, not a drop-in DLSS, not affiliated
+with or endorsed by NVIDIA. DLSS Super Resolution was measured and
+deliberately left out: without engine motion vectors it loses to plain Lanczos.
 
 ![Input, default strength, processing scale 2 with detail 2](docs/assets/neural-rendering-control.png)
 
@@ -24,7 +35,7 @@ Neural rendering on a 1408×1600 game render, 1:1 crop: input, defaults, `--proc
 
 https://github.com/user-attachments/assets/ce94f426-910b-4556-bdf9-662cbdd5933a
 
-Frame generation: even frames in, generated frames, the withheld odd frames (click for the video).
+Frame generation: even frames in, generated frames out, the withheld frames for comparison.
 
 ## Requirements
 
@@ -52,7 +63,9 @@ swift build -c release && scripts/prepare-mlx-metallib.sh "$(swift build -c rele
 ```
 
 The second command is required after every clean Swift build: it places
-`mlx.metallib` next to the `mlxdlss` binary.
+`mlx.metallib` next to the `mlxdlss` binary. MLX is the primary backend;
+PyTorch runs the same graph on any machine; Core ML is an export with a fixed
+extent.
 
 ## Commands
 
@@ -170,11 +183,11 @@ plain video).
 
 ## Documentation
 
-- [Frame generation](docs/frame-generation.md): the recovered graph, its verification against the library, whole-clip results, speed.
-- [Super resolution](docs/super-resolution.md): what was measured and why it is not ported.
-- [Embedding guide](docs/embedding.md): the Swift API for still frames, Core ML heads and the temporal reference.
-- [Recovery notes](docs/recovery-notes.md): package format, the recovered neural-rendering graph, measured errors, temporal command-line reference.
-- [Research notes](docs/research/): kernel captures and the first-frame preprocessor.
+- [Frame generation](docs/frame-generation.md): graph, verification, speed.
+- [Super resolution](docs/super-resolution.md): measured, not ported.
+- [Embedding guide](docs/embedding.md): the Swift API.
+- [Recovery notes](docs/recovery-notes.md): package format, recovered graph, measured errors.
+- [Research notes](docs/research/): kernel captures and the preprocessor.
 
 ## Development
 
