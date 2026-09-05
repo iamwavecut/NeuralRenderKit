@@ -3,7 +3,7 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "neuralrenderkit"
+name = "mlxdlss"
 version = "0.1.0"
 description = "PyTorch inference pipeline and bring-your-own-DLL weight tooling for the recovered neural-rendering transformer"
 readme = "README.md"
@@ -17,14 +17,14 @@ video = ["opencv-python-headless>=4.8"]
 web = ["nicegui>=2.10", "pydantic>=2"]
 
 [project.scripts]
-nrk-torch = "neuralrenderkit.cli:main"
-nrk-weights = "neuralrenderkit.tools.cli:main"
-nrk-video = "neuralrenderkit.video_cli:main"
-nrk-web = "neuralrenderkit.web.app:main"
+mlxdlss-torch = "mlxdlss.cli:main"
+mlxdlss-weights = "mlxdlss.tools.cli:main"
+mlxdlss-video = "mlxdlss.video_cli:main"
+mlxdlss-web = "mlxdlss.web.app:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["neuralrenderkit*"]
+include = ["mlxdlss*"]
 
 [tool.setuptools.package-data]
-neuralrenderkit = ["*.json"]
+mlxdlss = ["*.json"]

@@ -1,6 +1,6 @@
 # Publication gate
 
-NeuralRenderKit's generic runtime, synthetic fixtures, independently written
+MLX-DLSS's generic runtime, synthetic fixtures, independently written
 model graphs, and documentation are intended for an Apache-2.0 source release.
 No release may contain NVIDIA binaries, extracted weights, CUDA images,
 disassembly dumps, private oracle captures, or generated model packages.

@@ -1,6 +1,6 @@
 # Security policy
 
-NeuralRenderKit is pre-release software. Until a stable release exists, only the latest `main` revision receives security fixes.
+MLX-DLSS is pre-release software. Until a stable release exists, only the latest `main` revision receives security fixes.
 
 ## Reporting
 

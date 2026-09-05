@@ -3,8 +3,8 @@ import unittest
 
 import torch
 
-from neuralrenderkit import model as model_module
-from neuralrenderkit.model import NeuralRenderingModel
+from mlxdlss import model as model_module
+from mlxdlss.model import NeuralRenderingModel
 
 from .synthetic import synthetic_weights
 

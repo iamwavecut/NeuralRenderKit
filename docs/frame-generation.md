@@ -1,11 +1,11 @@
 # Frame generation: what was recovered and how it was verified
 
-NeuralRenderKit's frame generator is a port of the video path of NVIDIA's DLSS
+MLX-DLSS's frame generator is a port of the video path of NVIDIA's DLSS
 Frame Generation library (`libnvidia-ngx-dlssg.so`, DLSS SDK 310.7.0). This
 note records the recovered graph, the evidence behind each piece and the
 numbers that tie the port to the vendor's output. Nothing proprietary is
 reproduced here: the weights stay in the user's copy of the library and are
-extracted locally with `nrk-weights extract-fg`.
+extracted locally with `mlxdlss-weights extract-fg`.
 
 ## Method
 
@@ -67,10 +67,10 @@ float16 unless noted:
 
 | | 960×540 | 1920×1080 |
 | --- | --- | --- |
-| Metal, `nrk framegen`, one frame (N = 1) | 6.3 ms | 21 ms |
-| Metal, `nrk framegen --factor 4` (the three phases as one batch, N = 3) | 5.2 ms | 23 ms |
-| Metal, `nrk framegen-stream --batch 4` through the uint8 pipe (what `nrk-video framegen --backend nrk` uses) | 6.4 ms | 25 ms |
-| Metal, `nrk framegen-stream --batch 1`, float32 pipe (the previous protocol) | 27 ms | 43 ms |
+| Metal, `mlxdlss framegen`, one frame (N = 1) | 6.3 ms | 21 ms |
+| Metal, `mlxdlss framegen --factor 4` (the three phases as one batch, N = 3) | 5.2 ms | 23 ms |
+| Metal, `mlxdlss framegen-stream --batch 4` through the uint8 pipe (what `mlxdlss-video framegen --backend mlxdlss` uses) | 6.4 ms | 25 ms |
+| Metal, `mlxdlss framegen-stream --batch 1`, float32 pipe (the previous protocol) | 27 ms | 43 ms |
 | Metal (float32, MLX convolutions) | 9.2 ms | 32 ms |
 | PyTorch / MPS (float16) | 5.3 ms | 17 ms |
 | PyTorch / MPS (float32) | 6.3 ms | 22 ms |

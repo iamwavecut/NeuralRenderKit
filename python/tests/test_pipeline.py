@@ -5,8 +5,8 @@ import unittest
 import numpy as np
 import torch
 
-from neuralrenderkit import NeuralRenderingPipeline, NeuralRenderingSession, load_weights
-from neuralrenderkit.pipeline import validate_weights
+from mlxdlss import NeuralRenderingPipeline, NeuralRenderingSession, load_weights
+from mlxdlss.pipeline import validate_weights
 
 from .synthetic import synthetic_weights, write_logical_safetensors
 

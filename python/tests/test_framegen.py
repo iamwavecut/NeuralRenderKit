@@ -5,8 +5,8 @@ import unittest
 import numpy as np
 import torch
 
-from neuralrenderkit.framegen import FRAMEGEN_TENSORS, FrameGenerator, box2, photometric_error
-from neuralrenderkit.tools import extract_dlssg_weights as fgx
+from mlxdlss.framegen import FRAMEGEN_TENSORS, FrameGenerator, box2, photometric_error
+from mlxdlss.tools import extract_dlssg_weights as fgx
 
 
 def synthetic_framegen_weights(seed: int = 0, scale: float = 0.05) -> dict[str, torch.Tensor]:
@@ -129,10 +129,10 @@ class ExtractorLayoutTests(unittest.TestCase):
         self.assertTrue(set(FRAMEGEN_TENSORS) <= names)
 
 
-@unittest.skipUnless(os.environ.get("NRK_FG_WEIGHTS"), "set NRK_FG_WEIGHTS to a dense frame generation safetensors")
+@unittest.skipUnless(os.environ.get("MLXDLSS_FG_WEIGHTS"), "set MLXDLSS_FG_WEIGHTS to a dense frame generation safetensors")
 class FrameGenGoldenTests(unittest.TestCase):
     def test_moving_edge_is_placed_between_frames(self):
-        fg = FrameGenerator.from_safetensors(pathlib.Path(os.environ["NRK_FG_WEIGHTS"]), device="cpu")
+        fg = FrameGenerator.from_safetensors(pathlib.Path(os.environ["MLXDLSS_FG_WEIGHTS"]), device="cpu")
         h, w = 128, 192
         a = np.zeros((h, w, 3), np.uint8)
         b = np.zeros((h, w, 3), np.uint8)

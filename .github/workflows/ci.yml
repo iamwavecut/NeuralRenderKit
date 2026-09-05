@@ -112,5 +112,5 @@ jobs:
       - name: Command-line entry points
         shell: bash
         run: |
-          nrk-weights --help
-          nrk-torch run --help
+          mlxdlss-weights --help
+          mlxdlss-torch run --help

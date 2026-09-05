@@ -31,14 +31,14 @@ class PackageNeuralRenderingTransformerTests(unittest.TestCase):
                     "fully_logical": "true",
                 },
             )
-            destination = root / "NeuralRendering.nrkmodel"
+            destination = root / "NeuralRendering.dlssmodel"
 
             package_neural_rendering_transformer.package(source, destination)
 
             packaged_weights = destination / "weights.safetensors"
             manifest = json.loads((destination / "manifest.json").read_text())
             self.assertEqual(
-                manifest["architecture"], "nrk.neural-rendering-transformer.v1"
+                manifest["architecture"], "mlxdlss.neural-rendering-transformer.v1"
             )
             self.assertEqual(manifest["inputs"][0]["shape"], [1, "height", "width", 16])
             self.assertEqual(manifest["outputs"][0]["shape"], [1, "height", "width", 4])
@@ -66,10 +66,10 @@ class PackageNeuralRenderingTransformerTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(ValueError, "source format"):
                 package_neural_rendering_transformer.package(
-                    source, root / "model.nrkmodel"
+                    source, root / "model.dlssmodel"
                 )
 
-            destination = root / "existing.nrkmodel"
+            destination = root / "existing.dlssmodel"
             destination.mkdir()
             with self.assertRaises(FileExistsError):
                 package_neural_rendering_transformer.package(source, destination)

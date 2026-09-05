@@ -503,13 +503,13 @@ class NeuralRenderingReferenceTests(unittest.TestCase):
         self.assertEqual(torch.count_nonzero(padded[:, :, 6:]).item(), 0)
 
     @unittest.skipUnless(
-        os.environ.get("NRK_LOGICAL_WEIGHTS")
-        and os.environ.get("NRK_NEURAL_RENDERING_PACKAGE"),
+        os.environ.get("MLXDLSS_LOGICAL_WEIGHTS")
+        and os.environ.get("MLXDLSS_NEURAL_RENDERING_PACKAGE"),
         "set external neural-rendering paths to run full parity",
     )
     def test_external_full_model_matches_mlx_head(self):
         model = neural_rendering_reference.load_model(
-            pathlib.Path(os.environ["NRK_LOGICAL_WEIGHTS"])
+            pathlib.Path(os.environ["MLXDLSS_LOGICAL_WEIGHTS"])
         ).eval()
         input_values = (
             np.sin(np.arange(128 * 128 * 16, dtype=np.float32) * 0.001)
@@ -524,12 +524,12 @@ class NeuralRenderingReferenceTests(unittest.TestCase):
             input_path = root / "input.f32"
             output_path = root / "output.f32"
             input_values.tofile(input_path)
-            executable = REPOSITORY_ROOT / ".build/debug/nrk"
+            executable = REPOSITORY_ROOT / ".build/debug/mlxdlss"
             subprocess.run(
                 [
                     str(executable),
                     "run",
-                    os.environ["NRK_NEURAL_RENDERING_PACKAGE"],
+                    os.environ["MLXDLSS_NEURAL_RENDERING_PACKAGE"],
                     "--input",
                     str(input_path),
                     "--input-format",

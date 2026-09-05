@@ -2,7 +2,7 @@ import unittest
 
 import torch
 
-from neuralrenderkit.model import e4m3_round_trip, e4m3_round_trip_bitwise
+from mlxdlss.model import e4m3_round_trip, e4m3_round_trip_bitwise
 
 
 class RoundingTests(unittest.TestCase):

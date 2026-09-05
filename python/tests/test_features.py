@@ -2,7 +2,7 @@ import unittest
 
 import numpy as np
 
-from neuralrenderkit.features import NetworkGeometry, deterministic_noise, make_features, scaled_color
+from mlxdlss.features import NetworkGeometry, deterministic_noise, make_features, scaled_color
 
 
 class FeatureTests(unittest.TestCase):

@@ -2,9 +2,9 @@ import unittest
 
 import numpy as np
 
-from neuralrenderkit import NeuralRenderingPipeline
-from neuralrenderkit.features import NetworkGeometry, deterministic_noise, make_features, scaled_color
-from neuralrenderkit.temporal import (
+from mlxdlss import NeuralRenderingPipeline
+from mlxdlss.features import NetworkGeometry, deterministic_noise, make_features, scaled_color
+from mlxdlss.temporal import (
     TemporalOptions, TemporalSession, compose_temporal, extend_features, make_temporal_features, normalize_pixel_motion, sample_history,
 )
 
@@ -95,13 +95,13 @@ class TemporalSessionTests(unittest.TestCase):
 
     def test_flow_estimator_recovers_an_integer_shift(self):
         try:
-            from neuralrenderkit.temporal import FlowMotionEstimator
+            from mlxdlss.temporal import FlowMotionEstimator
             estimator = FlowMotionEstimator()
         except RuntimeError:
             self.skipTest("OpenCV not installed")
         rng = np.random.default_rng(4)
         base = rng.random((80, 112, 3)).astype(np.float32)
-        from neuralrenderkit.composition import blur, gaussian_kernel
+        from mlxdlss.composition import blur, gaussian_kernel
         base = np.stack([blur(base[..., c], gaussian_kernel(1.5)) for c in range(3)], axis=-1)
         previous = base[8:72, 8:104]; current = base[10:74, 5:101]   # content moved by (dx=-3, dy=+2) in pixels
         motion = estimator(current, previous)

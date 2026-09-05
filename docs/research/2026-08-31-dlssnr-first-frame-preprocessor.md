@@ -19,7 +19,7 @@ The public CPU reference is
 feed an RGB float32 tensor through this reference and the external MLX model:
 
 ```sh
-nrk run MODEL.nrkmodel \
+mlxdlss run MODEL.dlssmodel \
   --input rgb.f32 --input-format rgb-first-frame \
   --output output.f32 --height 128 --width 128
 ```
@@ -309,7 +309,7 @@ selects slot 0 for reprojected history and slot 2 for current color, motion, and
 ControlMask. The executable CPU, Metal, and MLX paths therefore linearly filter
 history and point-sample motion with clamp-to-edge behavior.
 `NeuralRenderingTextureTransform.pointSample` applies the same generic point
-mapping to current color and ControlMask. `nrk run` uses it once before both
+mapping to current color and ControlMask. `mlxdlss run` uses it once before both
 first-frame preprocessing and postprocessing, so red, green, blue, and source
 RGB select identical logical pixels.
 
@@ -399,7 +399,7 @@ This contract makes the temporal math executable without falsely assigning a
 meaning to arbitrary engine motion values. `normalizePixelMotion` implements the
 recovered pixel contract, including signed scales, effective extents, and an
 explicit previous-minus-current pixel jitter delta. Engines with a different
-convention still need an explicit adapter. `nrk run-sequence` exposes the same
+convention still need an explicit adapter. `mlxdlss run-sequence` exposes the same
 path as `--motion-format pixel --motion-scale-x X --motion-scale-y Y
 --jitter-delta-x JX --jitter-delta-y JY`; normalized UV remains the default.
 
@@ -462,13 +462,13 @@ kernels. It now generates base features on-device and fuses them with history
 sampling after frame one. Non-noise base channels and fused-versus-sequential
 device features are byte-exact; Metal deterministic noise is gated separately.
 
-For first-frame backing resources, `nrk run` accepts the same literal transform
+For first-frame backing resources, `mlxdlss run` accepts the same literal transform
 order as `--input-transform` and `--control-mask-transform`:
 `baseX,baseY,extentWidth,extentHeight,resourceWidth,resourceHeight`. A 256×128
 resource mapped to 128×128 selected the independently calculated odd columns;
 the transformed and pre-sampled exact-checkpoint runs were byte-identical.
 
-`nrk run-sequence` exposes `--input-transform`, `--motion-transform`, and
+`mlxdlss run-sequence` exposes `--input-transform`, `--motion-transform`, and
 `--history-transform` with the same field order. Current color is point-sampled
 once at ingress. Motion remains a backing-resource tensor so the selected CPU,
 Metal, or MLX temporal implementation applies recovered point sampling;
@@ -830,9 +830,9 @@ python Tools/make_neural_rendering_golden_bundle.py PRIVATE_BUNDLE \
   --depth-inverted false \
   --jitter-delta 0,0 --jitter-delta 0.25,-0.5
 python Tools/run_neural_rendering_golden_bundle.py \
-  PRIVATE_BUNDLE MODEL.nrkmodel candidate-outputs --dry-run
+  PRIVATE_BUNDLE MODEL.dlssmodel candidate-outputs --dry-run
 python Tools/run_neural_rendering_golden_bundle.py \
-  PRIVATE_BUNDLE MODEL.nrkmodel candidate-outputs
+  PRIVATE_BUNDLE MODEL.dlssmodel candidate-outputs
 python Tools/compare_neural_rendering_golden_bundle.py \
   PRIVATE_BUNDLE candidate-outputs --atol 0.001
 ```
@@ -842,7 +842,7 @@ RMSE, PSNR, and per-frame metrics. The bundle remains external; only the schema,
 validator, and synthetic unit tests are publishable. A capture may alternatively
 declare `motionConvention: "pixel-current-to-previous"`; that form must also
 record finite `motionScaleX/Y` and positive `motionWidth/Height`, and the
-candidate run must use the matching `nrk run-sequence` pixel-motion options.
+candidate run must use the matching `mlxdlss run-sequence` pixel-motion options.
 Pixel-motion frames may record finite two-number `jitterDeltaPixels`; absent
 values mean zero. The candidate runner preserves those values in frame order,
 prints its exact command in dry-run mode, and executes that same vector otherwise.

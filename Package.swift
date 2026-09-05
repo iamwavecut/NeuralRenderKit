@@ -2,15 +2,15 @@
 import PackageDescription
 
 let package = Package(
-  name: "NeuralRenderKit",
+  name: "MLXDLSS",
   platforms: [
     .macOS(.v14)
   ],
   products: [
-    .library(name: "NeuralRenderCore", targets: ["NeuralRenderCore"]),
-    .library(name: "NeuralRenderCoreML", targets: ["NeuralRenderCoreML"]),
-    .library(name: "NeuralRenderMLX", targets: ["NeuralRenderMLX"]),
-    .executable(name: "nrk", targets: ["nrk"]),
+    .library(name: "DLSSCore", targets: ["DLSSCore"]),
+    .library(name: "DLSSCoreML", targets: ["DLSSCoreML"]),
+    .library(name: "DLSSMLX", targets: ["DLSSMLX"]),
+    .executable(name: "mlxdlss", targets: ["mlxdlss"]),
   ],
   dependencies: [
     .package(
@@ -20,31 +20,31 @@ let package = Package(
   ],
   targets: [
     .target(
-      name: "NeuralRenderCore",
+      name: "DLSSCore",
       linkerSettings: [
         .linkedFramework("Accelerate"),
         .linkedFramework("Metal"),
       ]
     ),
     .target(
-      name: "NeuralRenderCoreML",
-      dependencies: ["NeuralRenderCore"],
+      name: "DLSSCoreML",
+      dependencies: ["DLSSCore"],
       linkerSettings: [.linkedFramework("CoreML")]
     ),
     .target(
-      name: "NeuralRenderMLX",
+      name: "DLSSMLX",
       dependencies: [
-        "NeuralRenderCore",
+        "DLSSCore",
         .product(name: "MLX", package: "mlx-swift"),
         .product(name: "MLXNN", package: "mlx-swift"),
       ]
     ),
     .executableTarget(
-      name: "nrk",
+      name: "mlxdlss",
       dependencies: [
-        "NeuralRenderCore",
-        "NeuralRenderCoreML",
-        "NeuralRenderMLX",
+        "DLSSCore",
+        "DLSSCoreML",
+        "DLSSMLX",
       ],
       linkerSettings: [
         .linkedFramework("CoreGraphics"),
@@ -52,27 +52,27 @@ let package = Package(
       ]
     ),
     .testTarget(
-      name: "NeuralRenderCoreTests",
-      dependencies: ["NeuralRenderCore"]
+      name: "DLSSCoreTests",
+      dependencies: ["DLSSCore"]
     ),
     .testTarget(
-      name: "NeuralRenderCoreMLTests",
+      name: "DLSSCoreMLTests",
       dependencies: [
-        "NeuralRenderCore",
-        "NeuralRenderCoreML",
+        "DLSSCore",
+        "DLSSCoreML",
       ]
     ),
     .testTarget(
-      name: "NeuralRenderMLXTests",
+      name: "DLSSMLXTests",
       dependencies: [
-        "NeuralRenderCore",
-        "NeuralRenderMLX",
+        "DLSSCore",
+        "DLSSMLX",
         .product(name: "MLX", package: "mlx-swift"),
       ]
     ),
     .testTarget(
-      name: "NeuralRenderCLITests",
-      dependencies: ["nrk", "NeuralRenderMLX"]
+      name: "MLXDLSSCLITests",
+      dependencies: ["mlxdlss", "DLSSMLX"]
     ),
   ]
 )

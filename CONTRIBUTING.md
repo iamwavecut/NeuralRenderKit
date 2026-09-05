@@ -15,7 +15,7 @@ same model, input, machine, and output comparison.
 
 Do not submit proprietary binaries, model weights, extracted shaders,
 disassembly dumps, private captures, credentials, personal data, or generated
-`.mlpackage`/`.nrkmodel` artifacts. Use synthetic fixtures and describe how a
+`.mlpackage`/`.dlssmodel` artifacts. Use synthetic fixtures and describe how a
 maintainer can reproduce an external comparison locally.
 
 Security-sensitive reports should follow `SECURITY.md`. Questions about whether

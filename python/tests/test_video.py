@@ -4,9 +4,9 @@ import subprocess
 import tempfile
 import unittest
 
-from neuralrenderkit import NeuralRenderingPipeline
-from neuralrenderkit.video import ConvertOptions, VideoToolError, compare_command, convert, probe
-from neuralrenderkit import video_cli
+from mlxdlss import NeuralRenderingPipeline
+from mlxdlss.video import ConvertOptions, VideoToolError, compare_command, convert, probe
+from mlxdlss import video_cli
 
 from .synthetic import synthetic_weights
 

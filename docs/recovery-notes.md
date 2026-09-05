@@ -6,7 +6,7 @@ Moved verbatim from the former README: the package format, the recovered neural-
 A model package is data, never executable code:
 
 ```text
-Example.nrkmodel/
+Example.dlssmodel/
   manifest.json
   weights.safetensors
 ```
@@ -15,7 +15,7 @@ Schema version 1 declares the package identifier, reviewed architecture identifi
 
 The loader rejects malformed manifests, nested or absolute weight paths, missing files, digest mismatches, unexpected tensors, and shape/type mismatches before GPU execution. A digest verifies integrity, not authorship: applications remain responsible for package provenance and model licensing.
 
-The executable architecture identifier is `nrk.neural-rendering-transformer.v1`; `nrk.pixel-affine.v1` is the test fixture that exercises package plumbing.
+The executable architecture identifier is `mlxdlss.neural-rendering-transformer.v1`; `mlxdlss.pixel-affine.v1` is the test fixture that exercises package plumbing.
 
 The experimental neural-rendering architecture executes its complete 71-block
 MLX graph only with a user-supplied external package. Eager execution is the
@@ -80,7 +80,7 @@ This is substantial pipeline recovery, not the still-missing NVIDIA parity
 gate; proprietary weights and captures remain outside the repository.
 
 ```sh
-nrk run MODEL.nrkmodel \
+mlxdlss run MODEL.dlssmodel \
   --input rgb.f32 --input-format rgb-first-frame \
   --profile standard \
   --output output.f32 --height 128 --width 128
@@ -112,18 +112,18 @@ tone, and blue scales local structure. It may be logical-size or supplied as a
 point-transformed backing resource.
 
 ```sh
-nrk run MODEL.nrkmodel \
+mlxdlss run MODEL.dlssmodel \
   --input rgb.f32 --input-format rgb-first-frame \
   --output output.f32 --height 128 --width 128 \
   --style-index 64 --local-tone 0.75 --local-structure 0.25 \
   --auto-mask enabled --skin-structure -1
 
-nrk run MODEL.nrkmodel \
+mlxdlss run MODEL.dlssmodel \
   --input rgb.f32 --input-format rgb-first-frame \
   --control-mask control-mask-rgb.f32 --intensity 0.8 \
   --output output.f32 --height 128 --width 128
 
-nrk run MODEL.nrkmodel \
+mlxdlss run MODEL.dlssmodel \
   --input backing-rgb.f32 --input-format rgb-first-frame \
   --input-transform 0,0,256,128,256,128 \
   --control-mask backing-control-mask.f32 \
@@ -161,7 +161,7 @@ the processing size. Optional six-field transforms let current color and motion
 come from backing resources and configure retained-history sampling:
 
 ```sh
-nrk run-sequence MODEL.nrkmodel \
+mlxdlss run-sequence MODEL.dlssmodel \
   --input-format rgb-temporal-reference \
   --pipeline device-resident --execution eager \
   --motion-format pixel --motion-scale-x 1 --motion-scale-y 1 \
@@ -246,9 +246,9 @@ python Tools/make_neural_rendering_golden_bundle.py PRIVATE_BUNDLE \
   --depth-inverted false \
   --jitter-delta 0,0 --jitter-delta 0.25,-0.5
 python Tools/run_neural_rendering_golden_bundle.py \
-  PRIVATE_BUNDLE MODEL.nrkmodel candidate-outputs --dry-run
+  PRIVATE_BUNDLE MODEL.dlssmodel candidate-outputs --dry-run
 python Tools/run_neural_rendering_golden_bundle.py \
-  PRIVATE_BUNDLE MODEL.nrkmodel candidate-outputs
+  PRIVATE_BUNDLE MODEL.dlssmodel candidate-outputs
 python Tools/compare_neural_rendering_golden_bundle.py \
   PRIVATE_BUNDLE candidate-outputs --atol 0.001
 ```
@@ -274,8 +274,8 @@ verified against the vendor's library; the web front end.
 
 Open:
 
-1. NVIDIA golden parity for the temporal path. Measured so far on one private vendor capture (`.lab/oracle-static-seq/.../base-b`, 64 frames of one 256×256 frame with zero motion, depth 1, no jitter, through the golden-bundle tools): `nrk run-sequence --input-format rgb-temporal-reference` matches the vendor at MAE `0.0054` (max `0.12`, `42.3` dB) over all 64 frames, and the drift from frame 0 tracks the vendor's (vendor `0.0050 → 0.0181` MAE from frame 0 over 63 frames, ours `0.0055 → 0.0173`), so the recurrence adds no error beyond the single-frame level. Not captured: motion, jitter, disocclusion and mask cases (the feeder or the pod oracle would have to record them).
-2. Accelerator-resident neural rendering. Done: the 16 base feature channels are generated on the GPU (`MLXFirstFrameFeatureProcessor`, fused with the history reprojection for identity geometry; `NRK_NR_DEVICE_FEATURES=0` restores the CPU preprocessor), bit-identical to the CPU path because both evaluate the noise with the same software `log`/`sin`/`cos` (`NeuralRenderingNoiseMath`; library functions differ by an ulp at a few pixels per frame and the network turns that into a 0.09 output difference). Remaining: the float32 readback and `Data` copies of the output (`asArray` → `HostTensor`), the float32 pipe of `nrk stream` (colour, motion, depth in; colour out), and the CPU postprocessor of the first-frame command.
-3. Frame generation on Metal. Done: every stage takes a batch (phases of a pair, `--batch` consecutive pairs) and the frame server speaks uint8 (540p 12.6 → 6.2 ms, 1080p 45 → 26 ms per generated frame at steady state). The GPU time itself is throughput-bound already at one frame (4.6 ms at 960×540, 27 ms at 1080p; batching gains ≤ 16 %), so the next lever is convolution efficiency: the per-pixel kernel reuses no input across output pixels; a tiled `simdgroup_matrix` kernel with the halo in threadgroup memory is the candidate (the existing `NRK_FG_SIMD=1` kernel reuses weights only).
+1. NVIDIA golden parity for the temporal path. Measured so far on one private vendor capture (`.lab/oracle-static-seq/.../base-b`, 64 frames of one 256×256 frame with zero motion, depth 1, no jitter, through the golden-bundle tools): `mlxdlss run-sequence --input-format rgb-temporal-reference` matches the vendor at MAE `0.0054` (max `0.12`, `42.3` dB) over all 64 frames, and the drift from frame 0 tracks the vendor's (vendor `0.0050 → 0.0181` MAE from frame 0 over 63 frames, ours `0.0055 → 0.0173`), so the recurrence adds no error beyond the single-frame level. Not captured: motion, jitter, disocclusion and mask cases (the feeder or the pod oracle would have to record them).
+2. Accelerator-resident neural rendering. Done: the 16 base feature channels are generated on the GPU (`MLXFirstFrameFeatureProcessor`, fused with the history reprojection for identity geometry; `MLXDLSS_NR_DEVICE_FEATURES=0` restores the CPU preprocessor), bit-identical to the CPU path because both evaluate the noise with the same software `log`/`sin`/`cos` (`NeuralRenderingNoiseMath`; library functions differ by an ulp at a few pixels per frame and the network turns that into a 0.09 output difference). Remaining: the float32 readback and `Data` copies of the output (`asArray` → `HostTensor`), the float32 pipe of `mlxdlss stream` (colour, motion, depth in; colour out), and the CPU postprocessor of the first-frame command.
+3. Frame generation on Metal. Done: every stage takes a batch (phases of a pair, `--batch` consecutive pairs) and the frame server speaks uint8 (540p 12.6 → 6.2 ms, 1080p 45 → 26 ms per generated frame at steady state). The GPU time itself is throughput-bound already at one frame (4.6 ms at 960×540, 27 ms at 1080p; batching gains ≤ 16 %), so the next lever is convolution efficiency: the per-pixel kernel reuses no input across output pixels; a tiled `simdgroup_matrix` kernel with the halo in threadgroup memory is the candidate (the existing `MLXDLSS_FG_SIMD=1` kernel reuses weights only).
 4. Frame generation inputs the library has and video does not use: motion vectors, depth, HUD compositing, disocclusion inpainting (low priority: none of them exist for plain video).
 5. Neural rendering inputs. The network sees 16 channels per pixel: three deterministic noise channels (0–2), a constant one (3), the scaled colour twice (4–6 and 7–9; the temporal path replaces 7–9 with the reprojected previous output), the style index (10), the tone and structure strengths (11–12, per pixel through the green and blue channels of a control mask) and the skin/automatic-mask structure strengths (13–14; the vendor fills them from its own segmentation, which is not part of the port). No depth, motion or material inputs exist. Ways to enrich the path without new weights: per-pixel tone/structure masks from a segmentation model (faces, skin, sky, text) or from a saliency map, standing in for the vendor's automatic mask; a user-drawn or tracked control mask for video; and the history channels, which already accept any reprojected image (a denoised or super-resolved previous frame, not only the network's own output).

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run a validated external neural-rendering golden bundle through NRK."""
+"""Run a validated external neural-rendering golden bundle through MLX-DLSS."""
 
 from __future__ import annotations
 
@@ -73,7 +73,7 @@ def build_arguments(
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Run a private NVIDIA golden bundle through NeuralRenderKit."
+        description="Run a private NVIDIA golden bundle through MLX-DLSS."
     )
     parser.add_argument("bundle", type=pathlib.Path)
     parser.add_argument("model", type=pathlib.Path)
@@ -81,7 +81,7 @@ def main() -> int:
     parser.add_argument(
         "--executable",
         type=pathlib.Path,
-        default=pathlib.Path(__file__).resolve().parents[1] / ".build/release/nrk",
+        default=pathlib.Path(__file__).resolve().parents[1] / ".build/release/mlxdlss",
     )
     parser.add_argument("--dry-run", action="store_true")
     options = parser.parse_args()

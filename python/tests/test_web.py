@@ -12,11 +12,11 @@ import importlib.util
 import numpy as np
 
 if importlib.util.find_spec("pydantic") is None or importlib.util.find_spec("fastapi") is None:
-    raise unittest.SkipTest("the web front end needs the 'web' extra (pip install 'neuralrenderkit[web]')")
+    raise unittest.SkipTest("the web front end needs the 'web' extra (pip install 'mlxdlss[web]')")
 
-from neuralrenderkit.web.effects import FrameGen, NeuralRender, describe_effects, media_kind, parse_effects, validate_chain
-from neuralrenderkit.web.jobs import JobQueue, JobStore
-from neuralrenderkit.web.settings import Settings
+from mlxdlss.web.effects import FrameGen, NeuralRender, describe_effects, media_kind, parse_effects, validate_chain
+from mlxdlss.web.jobs import JobQueue, JobStore
+from mlxdlss.web.settings import Settings
 
 from .synthetic import synthetic_weights, write_logical_safetensors
 from .test_framegen import synthetic_framegen_weights
@@ -52,7 +52,7 @@ class EffectTests(unittest.TestCase):
             parse_effects([{"kind": "fg", "factor": 5}])
 
     def test_describe(self):
-        d = describe_effects(nrk_available=False, fg_weights=True, nr_weights=False)
+        d = describe_effects(mlxdlss_available=False, fg_weights=True, nr_weights=False)
         kinds = {e["kind"]: e for e in d["effects"]}
         self.assertTrue(kinds["fg"]["available"]); self.assertFalse(kinds["nr"]["available"])
         self.assertEqual(kinds["fg"]["fields"]["factor"]["choices"], [2, 3, 4])
@@ -140,8 +140,8 @@ class ApiAndRunnerTests(unittest.TestCase):
 
         save_file(synthetic_framegen_weights(), str(cls.fg_weights), metadata={"format": "dlssg-framegen-dense-v1"})
         settings = Settings(root=str(root / "web"), nr_weights=str(cls.nr_weights), fg_weights=str(cls.fg_weights), backend="torch", device="cpu")
-        from neuralrenderkit.web.state import WebState
-        from neuralrenderkit.web.api import build_router
+        from mlxdlss.web.state import WebState
+        from mlxdlss.web.api import build_router
         from fastapi import FastAPI
         from fastapi.testclient import TestClient
 
@@ -198,7 +198,7 @@ class ApiAndRunnerTests(unittest.TestCase):
         job = self._wait(response.json()["id"], timeout=600)
         self.assertEqual(job["state"], "done", job.get("error"))
         self.assertEqual(job["outputs"], ["result.mp4"])
-        from neuralrenderkit.video import probe
+        from mlxdlss.video import probe
 
         info = probe(self.state.store.folder(job["id"]) / "result.mp4")
         self.assertEqual(info.frame_count, 7)   # 4 frames -> 4 + 3 generated

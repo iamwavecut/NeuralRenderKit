@@ -7,7 +7,7 @@ import pathlib
 import numpy as np
 import torch
 
-SPEC = json.loads((pathlib.Path(__file__).resolve().parents[1] / "neuralrenderkit" / "weight_spec.json").read_text())["tensors"]
+SPEC = json.loads((pathlib.Path(__file__).resolve().parents[1] / "mlxdlss" / "weight_spec.json").read_text())["tensors"]
 
 
 def synthetic_weights(seed: int = 0, scale: float = 0.05) -> dict[str, torch.Tensor]:

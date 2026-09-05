@@ -11,5 +11,5 @@ docs/handover/
 *.egg-info/
 python/build/
 
-# extracted proprietary weights (nrk-weights output), never committed
+# extracted proprietary weights (mlxdlss-weights output), never committed
 weights/

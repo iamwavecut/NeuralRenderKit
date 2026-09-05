@@ -29,7 +29,7 @@ fi
 swift --version
 scripts/audit-public-tree.sh .
 python3 -m py_compile Tools/*.py Tests/ToolsTests/*.py
-python3 -m py_compile python/neuralrenderkit/*.py python/neuralrenderkit/tools/*.py python/tests/*.py
+python3 -m py_compile python/mlxdlss/*.py python/mlxdlss/tools/*.py python/tests/*.py
 python3 -m unittest \
   Tests/ToolsTests/test_compare_f32.py \
   Tests/ToolsTests/test_compare_neural_rendering_golden_bundle.py
@@ -54,7 +54,7 @@ else
   echo "Python package tests: skipped (torch, numpy, safetensors, and pillow are optional)"
 fi
 
-if [[ "${NRK_SKIP_BUILD_AND_INFERENCE:-0}" == "1" ]]; then
+if [[ "${MLXDLSS_SKIP_BUILD_AND_INFERENCE:-0}" == "1" ]]; then
   echo "build and inference: skipped by test harness"
   echo "verification: passed"
   exit 0
@@ -63,7 +63,7 @@ fi
 swift package resolve
 scripts/prepare-mlx-metallib.sh
 
-if [[ "${NRK_SKIP_NESTED_SWIFT_TEST:-0}" != "1" ]]; then
+if [[ "${MLXDLSS_SKIP_NESTED_SWIFT_TEST:-0}" != "1" ]]; then
   SWIFTPM_MAXIMUM_CONCURRENT_JOBS=2 swift test
 else
   echo "swift test: skipped by nested test harness"

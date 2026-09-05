@@ -4,8 +4,8 @@ import unittest
 
 import numpy as np
 
-from neuralrenderkit import cli
-from neuralrenderkit.tools import cli as weights_cli
+from mlxdlss import cli
+from mlxdlss.tools import cli as weights_cli
 
 from .synthetic import synthetic_weights, write_logical_safetensors
 
@@ -30,7 +30,7 @@ class CLITests(unittest.TestCase):
             root = pathlib.Path(directory)
             weights = root / "weights.safetensors"
             write_logical_safetensors(weights, synthetic_weights())
-            package = root / "Model.nrkmodel"
+            package = root / "Model.dlssmodel"
             self.assertEqual(weights_cli.main(["mlx", str(weights), str(package)]), 0)
             self.assertTrue((package / "manifest.json").exists())
             self.assertTrue((package / "weights.safetensors").exists())
@@ -44,7 +44,7 @@ class CLITests(unittest.TestCase):
 
 class VersionAndInspectTests(unittest.TestCase):
     def test_pe_file_version_reads_the_utf16_string(self):
-        from neuralrenderkit.tools.extract_dlssnr_weights import pe_file_version
+        from mlxdlss.tools.extract_dlssnr_weights import pe_file_version
 
         blob = b"junk" + "FileVersion".encode("utf-16-le") + b"\x00\x00\x00\x00" + "310,8,0,0".encode("utf-16-le") + b"\x00\x00tail"
         self.assertEqual(pe_file_version(blob), "310,8,0,0")

@@ -2,7 +2,7 @@ import unittest
 
 import numpy as np
 
-from neuralrenderkit.composition import blur, compose_detail, compose_head, gaussian_kernel, resample
+from mlxdlss.composition import blur, compose_detail, compose_head, gaussian_kernel, resample
 
 
 class CompositionTests(unittest.TestCase):

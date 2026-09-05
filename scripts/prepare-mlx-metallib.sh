@@ -3,10 +3,10 @@ set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MLX_SOURCE="$PROJECT_ROOT/.build/checkouts/mlx-swift/Source/Cmlx/mlx"
-METAL_BUILD="$PROJECT_ROOT/.build/nrk-mlx-metallib"
+METAL_BUILD="$PROJECT_ROOT/.build/mlxdlss-mlx-metallib"
 METALLIB="$METAL_BUILD/mlx/backend/metal/kernels/mlx.metallib"
-MIN_MACOS_VERSION="${NRK_MIN_MACOS_VERSION:-14.0}"
-BUILD_JOBS="${NRK_BUILD_JOBS:-2}"
+MIN_MACOS_VERSION="${MLXDLSS_MIN_MACOS_VERSION:-14.0}"
+BUILD_JOBS="${MLXDLSS_BUILD_JOBS:-2}"
 
 for command_name in cmake ninja xcrun swift; do
   if ! command -v "$command_name" >/dev/null 2>&1; then

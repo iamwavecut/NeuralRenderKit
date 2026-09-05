@@ -1,9 +1,9 @@
 # Embedding the neural-rendering component
 
-The `nrk` commands are thin wrappers around these types; an application, a
+The `mlxdlss` commands are thin wrappers around these types; an application, a
 media pipeline or a server drives the recovered checkpoint through the
-library alone. Every example assumes a user-supplied `MODEL.nrkmodel` produced
-by `nrk-weights`; NeuralRenderKit never bundles or redistributes weights.
+library alone. Every example assumes a user-supplied `MODEL.dlssmodel` produced
+by `mlxdlss-weights`; MLX-DLSS never bundles or redistributes weights.
 
 | Use case | Type | Cadence |
 | --- | --- | --- |
@@ -27,8 +27,8 @@ head accepts directly.
 ## Still frame
 
 ```swift
-import NeuralRenderCore
-import NeuralRenderMLX
+import DLSSCore
+import DLSSMLX
 
 let head = try MLXNeuralRenderer(
   packageURL: modelPackageURL, executionMode: .metalFused, computePrecision: .float16
@@ -52,7 +52,7 @@ An optional `controlMask` tensor (`[1, H, W, 3]`, red = blend, green = tone,
 blue = structure) travels next to `color` in the same request. The photoreal
 recipe (`--processing-scale`, `--detail-strength`, `--colour-strength`) is
 `NeuralRenderingDetailComposition.resample` and `.compose` applied around the
-backend exactly as `nrk run` and `nrk render-image` do.
+backend exactly as `mlxdlss run` and `mlxdlss render-image` do.
 
 ## Temporal reference
 
@@ -76,7 +76,7 @@ converts engine pixel motion with its scale and jitter.
 ## Fixed-shape Core ML head
 
 ```swift
-import NeuralRenderCoreML
+import DLSSCoreML
 
 let head = try await CoreMLNeuralRenderer(
   modelURL: coreMLPackageURL,    // converted at the network extent, e.g. 320×320
@@ -86,7 +86,7 @@ let head = try await CoreMLNeuralRenderer(
 
 The package is compiled for one network extent: a `256×256` frame needs a
 `320×320` package, `1080p` needs `1920×1088`. A Core ML package freezes the
-graph at conversion time, so rebuild it with `nrk-weights coreml` whenever the
+graph at conversion time, so rebuild it with `mlxdlss-weights coreml` whenever the
 recovered graph changes; the MLX path applies such fixes at load time.
 
 ## Performance expectations

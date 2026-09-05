@@ -210,7 +210,7 @@ def compare_bundle(
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Compare private external golden outputs with numbered NRK outputs."
+        description="Compare private external golden outputs with numbered MLX-DLSS outputs."
     )
     parser.add_argument("bundle", type=pathlib.Path)
     parser.add_argument("candidate_directory", type=pathlib.Path)

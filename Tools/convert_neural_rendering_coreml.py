@@ -1,4 +1,4 @@
-"""Compatibility shim: the implementation lives in ``python/neuralrenderkit``.
+"""Compatibility shim: the implementation lives in ``python/mlxdlss``.
 
 Importing this module yields the package module itself (same object), so
 callers that patch attributes or compare classes keep working.
@@ -10,10 +10,10 @@ _PACKAGE_ROOT = str(pathlib.Path(__file__).resolve().parents[1] / "python")
 if _PACKAGE_ROOT not in sys.path:
     sys.path.insert(0, _PACKAGE_ROOT)
 
-from neuralrenderkit.tools.convert_neural_rendering_coreml import *  # noqa: E402,F401,F403
-from neuralrenderkit.tools.convert_neural_rendering_coreml import main  # noqa: E402,F401
+from mlxdlss.tools.convert_neural_rendering_coreml import *  # noqa: E402,F401,F403
+from mlxdlss.tools.convert_neural_rendering_coreml import main  # noqa: E402,F401
 
-import neuralrenderkit.tools.convert_neural_rendering_coreml as _implementation  # noqa: E402
+import mlxdlss.tools.convert_neural_rendering_coreml as _implementation  # noqa: E402
 
 sys.modules[__name__] = _implementation
 
